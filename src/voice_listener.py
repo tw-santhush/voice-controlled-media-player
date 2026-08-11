@@ -6,6 +6,8 @@ try:
 except ImportError:
     sr = None
 
+import config
+
 logger = logging.getLogger(__name__)
 
 if sr is not None:
@@ -29,18 +31,29 @@ def _require_speech_recognition() -> None:
 class VoiceListener:
     """Handles microphone input and speech recognition."""
 
-    def __init__(self, recognizer=None, source=None):
+    def __init__(self, recognizer=None, source=None, timeout=None, phrase_time_limit=None):
         if recognizer is None:
             _require_speech_recognition()
             recognizer = sr.Recognizer()
+        cfg = config.get_config()
+        self.timeout = timeout if timeout is not None else cfg.voice.timeout_seconds
+        self.phrase_time_limit = (
+            phrase_time_limit
+            if phrase_time_limit is not None
+            else cfg.voice.phrase_time_limit
+        )
         self.recognizer = recognizer
         self.source = source
         self._stop_event = threading.Event()
         self._thread = None
 
-    def listen_once(self, timeout=5, phrase_time_limit=None) -> str | None:
+    def listen_once(self, timeout=None, phrase_time_limit=None) -> str | None:
         """Listen for a single utterance and return the recognized text."""
         try:
+            timeout = self.timeout if timeout is None else timeout
+            phrase_time_limit = (
+                self.phrase_time_limit if phrase_time_limit is None else phrase_time_limit
+            )
             source = self.source
             if source is None:
                 _require_speech_recognition()
@@ -62,9 +75,10 @@ class VoiceListener:
             logger.exception("Unexpected error during voice recognition: %s", exc)
             return None
 
-    def listen_loop(self, callback, timeout=5) -> None:
+    def listen_loop(self, callback, timeout=None) -> None:
         """Start continuous listening in a background thread."""
         self._stop_event.clear()
+        timeout = self.timeout if timeout is None else timeout
         self._thread = threading.Thread(
             target=self._run_loop,
             args=(callback, timeout),

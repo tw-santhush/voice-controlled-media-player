@@ -63,6 +63,7 @@ python src/main.py --player auto --continuous
 | `--player`     | `vlc`, `mpc`, or `auto` (default: `auto`). Auto detects the running player. |
 | `--continuous` | Run continuously, listening for voice commands (default: `True`). |
 | `--single`     | Listen for a single command and exit (useful for testing).      |
+| `--config`     | Path to a custom JSON config file (default: `config.json`).     |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -75,6 +76,40 @@ python src/main.py --check-deps
 
 It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, and `python-vlc` are available.
 
+## Configuration
+
+All settings live in a single JSON file. The app automatically creates `config.json` in the project root
+(with defaults) the first time it runs, so you can start without any setup.
+
+To customize:
+
+1. Copy the template to get a personal config:
+   ```powershell
+   Copy-Item config.example.json config.json
+   ```
+2. Edit `config.json`. Supported sections:
+
+   | Section            | What it controls                                                        |
+   | ------------------ | ----------------------------------------------------------------------- |
+   | `vlc`              | VLC host, HTTP port, password, and whether VLC control is enabled        |
+   | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
+   | `voice`            | Listening timeout and phrase time limit (seconds)                        |
+   | `player`           | Default skip seconds and volume step                                     |
+   | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
+   | `commands`         | Spoken phrases → action mappings for voice commands                      |
+
+3. Run the app; it reads `config.json` on startup.
+
+Use a different file with `--config`:
+
+```powershell
+python src/main.py --config my-settings.json
+```
+
+> Note: `config.json` is ignored by Git on purpose — it may contain your VLC password and other personal
+> settings. The committed `config.example.json` is the safe template. If you change the config while the app
+> is running, restart the app (or force a reload) to pick up the new values.
+
 ### Enable the player web interfaces
 
 VLC: Tools → Preferences → Show all settings → Interface → Main interfaces → Web, then set an HTTP port/password (default 8080 / `admin`).
@@ -85,8 +120,9 @@ MPC-HC: View → Options → Player → Web Interface → tick "Listen on port" 
 
 ```
 .
-+-- src/          # Source code (config, voice listener, player controllers, main)
-+-- tests/        # Unit tests (mocked microphone)
++-- src/                    # Source code (config, voice listener, player controllers, main)
++-- tests/                  # Unit tests (mocked microphone)
++-- config.example.json     # Committed template; copy to config.json and edit
 +-- requirements.txt
 +-- README.md
 ```

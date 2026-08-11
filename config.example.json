@@ -1,0 +1,46 @@
+{
+  "vlc": {
+    "host": "localhost",
+    "port": 8080,
+    "password": "admin",
+    "enabled": true
+  },
+  "mpc": {
+    "host": "localhost",
+    "port": 13579,
+    "enabled": true
+  },
+  "voice": {
+    "timeout_seconds": 5,
+    "phrase_time_limit": 3
+  },
+  "player": {
+    "default_skip_seconds": 10,
+    "volume_step": 5
+  },
+  "keyboard_fallback": {
+    "enabled": true,
+    "shortcuts": {
+      "play_pause": "space",
+      "stop": "s",
+      "skip_forward": "right",
+      "skip_backward": "left",
+      "volume_up": "up",
+      "volume_down": "down",
+      "mute": "m",
+      "fullscreen": "f"
+    }
+  },
+  "commands": {
+    "play": ["play", "resume", "continue"],
+    "pause": ["pause", "hold", "stop playing"],
+    "stop": ["stop", "quit", "end"],
+    "skip_forward": ["skip forward", "forward 10 seconds", "jump forward"],
+    "skip_backward": ["skip backward", "backward 10 seconds", "go back"],
+    "volume_up": ["volume up", "louder", "increase volume"],
+    "volume_down": ["volume down", "softer", "decrease volume"],
+    "mute": ["mute", "silence"],
+    "fullscreen": ["fullscreen", "full screen"],
+    "exit": ["exit", "quit app", "close"]
+  }
+}

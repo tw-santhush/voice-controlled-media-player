@@ -56,10 +56,23 @@ def detect_active_player() -> str | None:
 class PlayerController:
     name = "generic"
 
+    def __init__(self, skip_seconds=None, volume_step=None, fallback_enabled=None):
+        cfg = config.get_config()
+        self.skip_seconds = (
+            skip_seconds if skip_seconds is not None else cfg.player.default_skip_seconds
+        )
+        self.volume_step = volume_step if volume_step is not None else cfg.player.volume_step
+        self.fallback_enabled = (
+            cfg.keyboard_fallback.enabled if fallback_enabled is None else fallback_enabled
+        )
+
     def _report(self, action: str) -> None:
         logger.info("[%s] %s", self.name, action)
 
     def _fallback(self, action: str) -> bool:
+        if not self.fallback_enabled:
+            logger.info("[%s] Keyboard fallback disabled in config; skipping %s", self.name, action)
+            return False
         try:
             import keyboard
         except ImportError:
@@ -86,7 +99,7 @@ class PlayerController:
     def detect_active_player() -> str | None:
         return detect_active_player()
 
-    def play(self):
+    def play(self, **kwargs):
         raise NotImplementedError
 
     def pause(self):
@@ -95,16 +108,16 @@ class PlayerController:
     def stop(self):
         raise NotImplementedError
 
-    def skip_forward(self, seconds=10):
+    def skip_forward(self, seconds=None):
         raise NotImplementedError
 
-    def skip_backward(self, seconds=10):
+    def skip_backward(self, seconds=None):
         raise NotImplementedError
 
-    def volume_up(self, step=5):
+    def volume_up(self, step=None):
         raise NotImplementedError
 
-    def volume_down(self, step=5):
+    def volume_down(self, step=None):
         raise NotImplementedError
 
     def toggle_mute(self):
@@ -117,14 +130,31 @@ class PlayerController:
 class VLCController(PlayerController):
     name = "vlc"
 
-    def __init__(self, base_url: str | None = None, password: str | None = None):
+    def __init__(
+        self,
+        host=None,
+        port=None,
+        password=None,
+        enabled=None,
+        skip_seconds=None,
+        volume_step=None,
+    ):
         if requests is None:
             raise RuntimeError(REQUESTS_HINT)
-        self.base_url = base_url or config.VLC_BASE_URL
-        self.password = password if password is not None else config.VLC_PASSWORD
+        cfg = config.get_config()
+        self.enabled = cfg.vlc.enabled if enabled is None else enabled
+        self.password = password if password is not None else cfg.vlc.password
+        self.base_url = f"http://{host or cfg.vlc.host}:{port or cfg.vlc.port}/requests/status.xml"
+        super().__init__(skip_seconds=skip_seconds, volume_step=volume_step)
         self.session = requests.Session()
         self.session.auth = ("", self.password)
         self._muted_volume = None
+
+    def _check_enabled(self) -> bool:
+        if not self.enabled:
+            logger.warning("[vlc] VLC control is disabled in config (vlc.enabled=false)")
+            return False
+        return True
 
     def _http(self, command: str, params: dict | None = None) -> requests.Response:
         query = {"command": command}
@@ -142,7 +172,9 @@ class VLCController(PlayerController):
         muted = (root.findtext("muted") or "false").strip().lower() == "true"
         return volume, muted
 
-    def play(self):
+    def play(self, **kwargs):
+        if not self._check_enabled():
+            return
         try:
             self._http("pl_play")
         except requests.RequestException:
@@ -152,6 +184,8 @@ class VLCController(PlayerController):
         self._report("play")
 
     def pause(self):
+        if not self._check_enabled():
+            return
         try:
             self._http("pl_pause")
         except requests.RequestException:
@@ -161,6 +195,8 @@ class VLCController(PlayerController):
         self._report("pause")
 
     def stop(self):
+        if not self._check_enabled():
+            return
         try:
             self._http("pl_stop")
         except requests.RequestException:
@@ -169,7 +205,10 @@ class VLCController(PlayerController):
             return
         self._report("stop")
 
-    def skip_forward(self, seconds=10):
+    def skip_forward(self, seconds=None):
+        seconds = self.skip_seconds if seconds is None else seconds
+        if not self._check_enabled():
+            return
         try:
             self._http("seek", {"val": f"+{seconds}"})
         except requests.RequestException:
@@ -178,7 +217,10 @@ class VLCController(PlayerController):
             return
         self._report(f"skip_forward (+{seconds}s)")
 
-    def skip_backward(self, seconds=10):
+    def skip_backward(self, seconds=None):
+        seconds = self.skip_seconds if seconds is None else seconds
+        if not self._check_enabled():
+            return
         try:
             self._http("seek", {"val": f"-{seconds}"})
         except requests.RequestException:
@@ -187,7 +229,10 @@ class VLCController(PlayerController):
             return
         self._report(f"skip_backward (-{seconds}s)")
 
-    def volume_up(self, step=5):
+    def volume_up(self, step=None):
+        step = self.volume_step if step is None else step
+        if not self._check_enabled():
+            return
         try:
             volume, _ = self._status()
             new_volume = min(int(volume) + step, VLC_VOLUME_MAX)
@@ -198,7 +243,10 @@ class VLCController(PlayerController):
             return
         self._report(f"volume_up (+{step})")
 
-    def volume_down(self, step=5):
+    def volume_down(self, step=None):
+        step = self.volume_step if step is None else step
+        if not self._check_enabled():
+            return
         try:
             volume, _ = self._status()
             new_volume = max(int(volume) - step, 0)
@@ -210,6 +258,8 @@ class VLCController(PlayerController):
         self._report(f"volume_down (-{step})")
 
     def toggle_mute(self):
+        if not self._check_enabled():
+            return
         try:
             volume, muted = self._status()
             if muted:
@@ -225,6 +275,8 @@ class VLCController(PlayerController):
         self._report("toggle_mute")
 
     def toggle_fullscreen(self):
+        if not self._check_enabled():
+            return
         try:
             self._http("fullscreen")
         except requests.RequestException:
@@ -250,12 +302,28 @@ class MPCController(PlayerController):
         "fullscreen": 830,
     }
 
-    def __init__(self, base_url: str | None = None):
+    def __init__(
+        self,
+        host=None,
+        port=None,
+        enabled=None,
+        skip_seconds=None,
+        volume_step=None,
+    ):
         if requests is None:
             raise RuntimeError(REQUESTS_HINT)
-        self.base_url = base_url or config.MPC_BASE_URL
-        self.command_url = self.base_url.rstrip("/") + "/command.html"
+        cfg = config.get_config()
+        self.enabled = cfg.mpc.enabled if enabled is None else enabled
+        base_url = f"http://{host or cfg.mpc.host}:{port or cfg.mpc.port}/"
+        self.command_url = base_url.rstrip("/") + "/command.html"
+        super().__init__(skip_seconds=skip_seconds, volume_step=volume_step)
         self.session = requests.Session()
+
+    def _check_enabled(self) -> bool:
+        if not self.enabled:
+            logger.warning("[mpc-hc] MPC-HC control is disabled in config (mpc.enabled=false)")
+            return False
+        return True
 
     def _wm(self, command: str):
         command_id = self.COMMANDS[command]
@@ -265,6 +333,8 @@ class MPCController(PlayerController):
         response.raise_for_status()
 
     def _send(self, command: str):
+        if not self._check_enabled():
+            return
         try:
             self._wm(command)
         except (requests.RequestException, KeyError):
@@ -282,16 +352,16 @@ class MPCController(PlayerController):
     def stop(self):
         self._send("stop")
 
-    def skip_forward(self, seconds=10):
+    def skip_forward(self, seconds=None):
         self._send("jump_forward")
 
-    def skip_backward(self, seconds=10):
+    def skip_backward(self, seconds=None):
         self._send("jump_backward")
 
-    def volume_up(self, step=5):
+    def volume_up(self, step=None):
         self._send("volume_up")
 
-    def volume_down(self, step=5):
+    def volume_down(self, step=None):
         self._send("volume_down")
 
     def toggle_mute(self):
@@ -305,10 +375,18 @@ class AutoController:
     """Detects the active player and routes commands to it."""
 
     def __init__(self, controllers: dict | None = None):
-        self.controllers = controllers or {
-            "vlc": VLCController(),
-            "mpc-hc": MPCController(),
-        }
+        if controllers is None:
+            cfg = config.get_config()
+            controllers = {}
+            if cfg.vlc.enabled:
+                controllers["vlc"] = VLCController()
+            else:
+                logger.info("[auto] VLC control is disabled in config")
+            if cfg.mpc.enabled:
+                controllers["mpc-hc"] = MPCController()
+            else:
+                logger.info("[auto] MPC-HC control is disabled in config")
+        self.controllers = controllers
         self.current = None
 
     def resolve(self) -> PlayerController | None:
@@ -317,6 +395,12 @@ class AutoController:
             self.current = self.controllers[active]
             logger.info("[auto] Routing to %s", active)
             return self.current
+        if active is not None:
+            logger.warning(
+                "[auto] %s is running but is disabled in config; enable it in config.json",
+                active,
+            )
+            return None
         logger.warning(
             "No active player detected. Launch VLC or MPC-HC first, then try again."
         )
@@ -337,16 +421,16 @@ class AutoController:
     def stop(self):
         self._route("stop")
 
-    def skip_forward(self, seconds=10):
+    def skip_forward(self, seconds=None):
         self._route("skip_forward", seconds)
 
-    def skip_backward(self, seconds=10):
+    def skip_backward(self, seconds=None):
         self._route("skip_backward", seconds)
 
-    def volume_up(self, step=5):
+    def volume_up(self, step=None):
         self._route("volume_up", step)
 
-    def volume_down(self, step=5):
+    def volume_down(self, step=None):
         self._route("volume_down", step)
 
     def toggle_mute(self):

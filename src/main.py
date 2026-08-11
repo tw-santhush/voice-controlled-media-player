@@ -102,9 +102,14 @@ def check_required_dependencies(log: logging.Logger) -> None:
 
 
 def build_controller(player: str) -> player_control.PlayerController:
+    cfg = config.get_config()
     if player == "vlc":
+        if not cfg.vlc.enabled:
+            print("WARNING: VLC control is disabled in config (vlc.enabled=false).")
         return player_control.VLCController()
     if player == "mpc":
+        if not cfg.mpc.enabled:
+            print("WARNING: MPC-HC control is disabled in config (mpc.enabled=false).")
         return player_control.MPCController()
     return player_control.AutoController()
 
@@ -155,7 +160,15 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Check dependency availability and print a status report, then exit",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to a custom JSON config file (default: config.json in the project root)",
+    )
     args = parser.parse_args(argv)
+
+    if args.config:
+        config.get_config(config_path=args.config)
 
     if args.check_deps:
         print_check_deps()
@@ -166,8 +179,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.single:
         args.continuous = False
 
+    cfg = config.get_config()
     controller = build_controller(args.player)
-    listener = VoiceListener()
+    listener = VoiceListener(
+        timeout=cfg.voice.timeout_seconds,
+        phrase_time_limit=cfg.voice.phrase_time_limit,
+    )
 
     log.info("Starting voice-controlled media player (player=%s)", args.player)
     print(f"Listening... player={args.player}. Press Ctrl+C to stop.")
