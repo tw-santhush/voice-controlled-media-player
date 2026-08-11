@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 _STRIP_PUNCTUATION = re.compile(r"[^a-z0-9\s]")
 _EXTRA_SPACES = re.compile(r"\s+")
+_VOLUME_KEYWORD = re.compile(r"\b(volume|vol|set|change)\b")
+_VOLUME_NUMBER = re.compile(r"\b(\d{1,3})\b")
 
 _config = None
 _config_path = None
@@ -80,6 +82,27 @@ def match_command(text: str) -> str | None:
                 best_action = action
                 best_len = len(phrase)
     return best_action
+
+
+def parse_volume_command(text: str) -> int | None:
+    """Return an absolute volume 0-100 from a phrase like "set volume to 50".
+
+    Matches a number anywhere in the text, but only when the text also contains a
+    volume-related keyword ("volume", "vol", "set", or "change"). Returns None
+    when no number or no volume keyword is present, or when the phrase matched a
+    normal command instead (e.g. "volume up").
+    """
+    if not text:
+        return None
+    normalized = _normalize(text)
+    if not normalized:
+        return None
+    if not _VOLUME_KEYWORD.search(normalized):
+        return None
+    match = _VOLUME_NUMBER.search(normalized)
+    if not match:
+        return None
+    return max(0, min(100, int(match.group(1))))
 
 
 def __getattr__(name: str):

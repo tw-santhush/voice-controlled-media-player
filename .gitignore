@@ -61,6 +61,9 @@ venv.bak/
 # Runtime app data
 app.log
 
+# Generated audio from --record-test (may contain your voice)
+test_audio.wav
+
 # Local user configuration (may contain passwords)
 config.json
 

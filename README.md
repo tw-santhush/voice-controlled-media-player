@@ -74,6 +74,9 @@ python src/main.py --player auto --continuous
 | `--list-mics`  | List all available microphones (via pyaudio) and exit.          |
 | `--test-tts`   | Speak a test phrase with the configured TTS engine, then exit (no microphone needed). |
 | `--train-wake` | Listen to 5 repetitions of your wake phrase and analyze how well it is recognized. |
+| `--record-test`| Record 3 seconds of microphone audio to `test_audio.wav`, play it back, and exit. |
+| `--energy-test`| Measure audio energy for 5 seconds and suggest a value for `voice.energy_threshold`, then exit. |
+| `--set-energy` | Override `voice.energy_threshold` for this run (e.g. `--set-energy 100`). |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -104,11 +107,11 @@ To customize:
    | ------------------ | ----------------------------------------------------------------------- |
    | `vlc`              | VLC host, HTTP port, password, and whether VLC control is enabled        |
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
-   | `voice`            | Listening timeout and phrase time limit (seconds)                        |
+   | `voice`            | Listening timeout, phrase time limit (seconds), and the `energy_threshold` used to detect speech start |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
    | `player`           | Default skip seconds and volume step                                     |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
-   | `commands`         | Spoken phrases → action mappings for voice commands                      |
+   | `commands`         | Spoken phrases → action mappings for voice commands (see Voice Commands) |
    | `tts`              | Text-to-speech feedback: `enabled` toggles it, `voice_id` selects a voice (null = default) |
    | `wake`             | Wake-word support: `enabled`, `phrases` (e.g. "hey player"), and `timeout_seconds` |
 
@@ -193,6 +196,52 @@ python src/main.py --player vlc --single --no-wake
 
 Enable/disable TTS exactly as above or in `config.json`.
 
+## Voice Commands
+
+The `commands` config section maps spoken phrases to player actions. Each action accepts multiple phrases,
+and the longest matching phrase wins ("stop playing" pauses, while "stop" alone stops). Default mappings:
+
+| Action          | Example phrases                                                                 |
+| --------------- | ------------------------------------------------------------------------------- |
+| `play`          | play, resume, continue, start, play movie, play video                            |
+| `pause`         | pause, hold, stop playing, freeze, pause movie, pause video                      |
+| `stop`          | stop, quit, end, stop movie, exit playback, stop video                           |
+| `skip_forward`  | skip forward, forward 10 seconds, jump forward, advance, fast forward            |
+| `skip_backward` | skip backward, rewind, go back, rewind 10 seconds                                |
+| `volume_up`     | volume up, louder, turn up, raise volume                                         |
+| `volume_down`   | volume down, softer, turn down, lower volume                                     |
+| `mute`          | mute, silence, no sound, turn off sound                                          |
+| `fullscreen`    | fullscreen, full screen, maximize, enter fullscreen                              |
+| `exit`          | exit, quit app, close, shutdown, terminate                                       |
+| `next`          | next, next track, next video, next episode, skip to next                         |
+| `previous`      | previous, previous track, go back a chapter, back chapter                        |
+| `volume_set`    | (special — handled by numeric parsing, see below)                                |
+
+Extend any action by adding phrases to the list in `config.json`, e.g.:
+
+```json
+"commands": {
+    "play": ["play", "resume", "continue", "go"],
+    "next": ["next", "next track", "skip to next"]
+}
+```
+
+### Absolute volume ("set volume to 30")
+
+Phrases that contain a volume-related keyword ("volume", "vol", "set", or "change") **and** a number are
+parsed as an absolute volume, clamped to 0-100. Any number found in the phrase is used (the first one):
+
+```bash
+"hey player, set volume to 30"   → 30%
+"hey player, volume 50"          → 50%
+"hey player, change volume 100"  → 100%
+"hey player, volume up"          → relative +5 (not absolute)
+```
+
+These are processed only when the phrase does **not** match a regular command first, so relative commands like
+"volume up"/"volume down" win over numeric parsing. Numeric volume is sent to the player through its web
+interface (`command=volume&val=N` for VLC, `volume=N` for MPC-HC).
+
 ## Speech Recognition
 
 Recognition defaults to Google (online). For fully offline recognition you can use **Vosk**, an open-source
@@ -235,6 +284,51 @@ python src/main.py --mic-index 1
 # Confirm audio is being captured (watch for high amplitude when you speak)
 python src/main.py --debug
 ```
+
+### Record and play back a sample (`--record-test`)
+
+Records 3 seconds from the default microphone, saves it to `test_audio.wav` in the project root,
+plays it back (via pyaudio, or the system sound player), and prints the peak amplitude and duration:
+
+```bash
+python src/main.py --record-test
+```
+
+This is the fastest way to confirm the microphone actually captures sound. If the peak amplitude
+stays near `0` while you speak, the mic is muted, not the default device, or too quiet.
+
+### Tune the speech-detection threshold (`--energy-test`)
+
+SpeechRecognition uses `recognizer.energy_threshold` to decide when speech starts (default `300`).
+If it is too high, your voice is ignored; too low and background noise triggers false commands.
+
+```bash
+python src/main.py --energy-test
+```
+
+It listens for 5 seconds, printing the energy every 0.5 seconds (current, running average, and peak).
+Stay quiet at first, then speak a little, so it can compare speech to the noise floor. At the end it
+suggests a threshold — apply it with:
+
+```bash
+python src/main.py --set-energy 100
+```
+
+Or set it permanently in the `voice` section of `config.json`:
+
+```json
+"voice": {
+    "timeout_seconds": 5,
+    "phrase_time_limit": 3,
+    "energy_threshold": 300,
+    "dynamic_energy_threshold": true
+}
+```
+
+- `energy_threshold`: the energy level above which a sound is treated as the start of speech.
+- `dynamic_energy_threshold`: when `true` (default), the recognizer re-adjusts the threshold to the
+  ambient noise on every listen, which works well in most environments. Set it to `false` to keep the
+  exact `energy_threshold` value.
 
 ### Test text-to-speech
 
@@ -287,3 +381,14 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`Vosk model download` fails** → The ~50 MB model is fetched from `alphacephei.com` on first `vosk` use. If the
   download fails or you are offline, download `vosk-model-small-en-us-0.15.zip` yourself, unzip it, and set
   `vosk_model_path` in the `recognizer` config section to the unzipped folder.
+- **My voice isn't being recognized** → Work through these steps in order:
+  1. Confirm the mic captures audio: `python src/main.py --record-test`. Play back `test_audio.wav` — if it is
+     silent, the mic is muted, not the default input device, or too quiet.
+  2. Check the energy levels: `python src/main.py --energy-test`. Speak during the test and confirm your voice
+     produces noticeably higher energy than the background noise.
+  3. Apply the suggested threshold: `python src/main.py --energy-test` prints a recommended value — use it with
+     `python src/main.py --set-energy <value>` to test, or set `voice.energy_threshold` permanently in
+     `config.json`. Lower the value if your speech barely exceeds the noise floor.
+  4. Run with `--debug` and watch for `rms`/`peak` in the audio stats — they confirm your voice is actually reaching
+     the recognizer. If the waveform looks healthy but recognition still fails, see "`Could not understand the audio`"
+     above.

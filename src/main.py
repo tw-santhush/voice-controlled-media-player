@@ -1,8 +1,11 @@
 import argparse
 import difflib
 import logging
+import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 try:
@@ -48,9 +51,10 @@ except (ImportError, OSError):
     HAS_VOSK = False
 
 import config
+import config_loader
 import player_control
 import tts
-from voice_listener import VoiceListener, list_microphones
+from voice_listener import VoiceListener, _peak, list_microphones
 
 LOG_FILE = "app.log"
 
@@ -72,6 +76,9 @@ TTS_PHRASES = {
     "mute": "Muted",
     "fullscreen": "Fullscreen",
     "exit": "Exiting",
+    "next": "Next track",
+    "previous": "Previous track",
+    "volume_set": "Volume set",
 }
 
 
@@ -152,12 +159,20 @@ def build_controller(player: str) -> player_control.PlayerController:
     return player_control.AutoController()
 
 
-def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False) -> None:
+def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False, volume: int | None = None) -> None:
     if not tts_cfg.enabled:
         return
     if failed:
         tts.speak(
             "Command failed",
+            voice_id=tts_cfg.voice_id,
+            engine=tts_cfg.engine,
+            fallback_enabled=tts_cfg.fallback_enabled,
+        )
+        return
+    if volume is not None:
+        tts.speak(
+            f"Volume set to {volume}",
             voice_id=tts_cfg.voice_id,
             engine=tts_cfg.engine,
             fallback_enabled=tts_cfg.fallback_enabled,
@@ -175,8 +190,19 @@ def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False) -> 
 
 def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg) -> None:
     action = config.match_command(text)
-    if not action:
-        log.info("No matching command for: %r", text)
+    if action is None:
+        volume = config.parse_volume_command(text)
+        if volume is None:
+            log.info("No matching command for: %r", text)
+            return
+        log.info("Numeric volume command: %r -> %d%%", text, volume)
+        try:
+            controller.set_volume(volume)
+        except Exception:
+            log.exception("Command set_volume failed")
+            speak_feedback(tts_cfg, failed=True)
+            return
+        speak_feedback(tts_cfg, volume=volume)
         return
     log.info("Recognized command: %r -> %s", text, action)
     if action == "exit":
@@ -299,6 +325,98 @@ def run_wake_training(listener: VoiceListener, repetitions: int = 5) -> None:
         print(f"  {line}")
 
 
+def play_wav_with_system(path) -> bool:
+    """Open a WAV file with the OS default player as a playback fallback."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["afplay", str(path)])
+        else:
+            subprocess.Popen(["aplay", str(path)])
+        return True
+    except Exception:
+        return False
+
+
+def play_wav_file(path) -> bool:
+    """Play a WAV file with pyaudio, falling back to the system sound player."""
+    try:
+        import wave as wave_module
+        import pyaudio
+    except ImportError:
+        return play_wav_with_system(path)
+    try:
+        with wave_module.open(str(path), "rb") as wf:
+            pa = pyaudio.PyAudio()
+            try:
+                stream = pa.open(
+                    format=pa.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True,
+                )
+                try:
+                    data = wf.readframes(1024)
+                    while data:
+                        stream.write(data)
+                        data = wf.readframes(1024)
+                finally:
+                    stream.stop_stream()
+                    stream.close()
+            finally:
+                pa.terminate()
+        return True
+    except Exception:
+        return play_wav_with_system(path)
+
+
+def run_record_test(listener: VoiceListener, seconds: float = 3.0) -> None:
+    """Record a few seconds of audio, save it to test_audio.wav, play it back, and exit."""
+    print(f"Recording {seconds:.0f}s of audio from the default microphone...")
+    audio = listener.capture_audio(duration=seconds)
+    raw = audio.get_raw_data()
+    sample_rate = getattr(audio, "sample_rate", 16000)
+    duration = (len(raw) / (2.0 * sample_rate)) if sample_rate else 0.0
+    peak = _peak(raw)
+    out_path = config_loader.PROJECT_ROOT / "test_audio.wav"
+    out_path.write_bytes(audio.get_wav_data())
+    print(f"Saved {duration:.2f}s of audio to {out_path} (peak amplitude {peak:,})")
+    if play_wav_file(out_path):
+        print("Played back the recording.")
+    else:
+        print("Could not play it back; open test_audio.wav in your player manually.")
+
+
+def run_energy_test(listener: VoiceListener, duration: float = 5.0, interval: float = 0.5) -> None:
+    """Measure audio energy and suggest a value for voice.energy_threshold."""
+    print(
+        f"Energy test: recording for {duration:.0f}s. Stay quiet first, then speak a little "
+        "so the test can compare your voice to the background noise."
+    )
+    readings = listener.measure_energy(duration=duration, interval=interval)
+    running_avg = 0.0
+    running_peak = 0.0
+    for i, level in enumerate(readings, start=1):
+        running_avg = (running_avg * (i - 1) + level) / i
+        running_peak = max(running_peak, level)
+        print(
+            f"  t={i * interval:4.1f}s  energy={level:7.1f}  "
+            f"average={running_avg:7.1f}  peak={running_peak:7.1f}"
+        )
+    sorted_readings = sorted(readings)
+    median = sorted_readings[len(sorted_readings) // 2]
+    suggested = max(round(median * 1.5), 30)
+    print()
+    print(f"Median ambient energy: {median:.1f}")
+    print(f"Suggested energy_threshold: {suggested}  (SpeechRecognition default is 300).")
+    print(f"Apply it with: python src/main.py --set-energy {suggested}")
+    if suggested > 300:
+        print("Your environment is noisy; a higher threshold reduces false triggers.")
+    elif suggested < 300:
+        print("Your microphone is quiet; a lower threshold makes quiet speech easier to detect.")
+
+
 def main(argv: list[str] | None = None) -> None:
     log = setup_logging()
     parser = argparse.ArgumentParser(description="Voice-controlled media player")
@@ -382,6 +500,22 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Listen to 5 repetitions of your wake phrase and analyze recognition",
     )
+    parser.add_argument(
+        "--record-test",
+        action="store_true",
+        help="Record 3 seconds of audio, save it to test_audio.wav, play it back, and exit",
+    )
+    parser.add_argument(
+        "--energy-test",
+        action="store_true",
+        help="Measure audio energy for 5 seconds and suggest an energy_threshold value, then exit",
+    )
+    parser.add_argument(
+        "--set-energy",
+        type=int,
+        default=None,
+        help="Override voice.energy_threshold for this run (e.g. --set-energy 100)",
+    )
     args = parser.parse_args(argv)
 
     if args.debug:
@@ -455,7 +589,16 @@ def main(argv: list[str] | None = None) -> None:
         recognizer_type=recognizer_type,
         vosk_model_path=getattr(cfg.recognizer, "vosk_model_path", None),
         device_index=args.mic_index,
+        energy_threshold=args.set_energy,
     )
+
+    if args.record_test:
+        run_record_test(listener)
+        return
+
+    if args.energy_test:
+        run_energy_test(listener)
+        return
 
     if args.train_wake:
         run_wake_training(listener)

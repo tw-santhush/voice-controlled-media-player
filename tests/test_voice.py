@@ -1,12 +1,15 @@
 import json
 import logging
 import os
+import struct
 import sys
+import tempfile
 import time
 import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -60,6 +63,30 @@ class FakeMicSource:
         pass
 
 
+class _MultiChunkAudio:
+    sample_rate = 16000
+
+    def __init__(self, data):
+        self._data = data
+
+    def get_raw_data(self):
+        return self._data
+
+
+class _RecordRecognizer:
+    """Recognizer stub that records fixed-tone audio in chunks."""
+
+    def __init__(self):
+        self.durations = []
+
+    def adjust_for_ambient_noise(self, source, duration=0.5):
+        pass
+
+    def record(self, source, duration=None):
+        self.durations.append(duration)
+        return _MultiChunkAudio(struct.pack("<100h", *([100] * 100)))
+
+
 class TestCommandMapping(unittest.TestCase):
     def test_every_mapped_phrase_resolves_to_its_action(self):
         for action, phrases in config.COMMAND_MAPPINGS.items():
@@ -79,6 +106,43 @@ class TestCommandMapping(unittest.TestCase):
 
     def test_punctuation_is_ignored(self):
         self.assertEqual(config.match_command("STOP PLAYING!!!"), "pause")
+
+
+class TestVolumeParsing(unittest.TestCase):
+    def test_set_volume_to_number(self):
+        self.assertEqual(config.parse_volume_command("set volume to 50"), 50)
+
+    def test_volume_number(self):
+        self.assertEqual(config.parse_volume_command("volume 25"), 25)
+
+    def test_change_volume(self):
+        self.assertEqual(config.parse_volume_command("change volume to 10"), 10)
+
+    def test_vol_abbreviation(self):
+        self.assertEqual(config.parse_volume_command("vol 30"), 30)
+
+    def test_case_and_percent_ignored(self):
+        self.assertEqual(config.parse_volume_command("SET VOLUME TO 80%"), 80)
+
+    def test_above_100_clamped(self):
+        self.assertEqual(config.parse_volume_command("volume 150"), 100)
+
+    def test_negative_or_zero_none(self):
+        self.assertEqual(config.parse_volume_command("volume -5"), 5)
+        self.assertIsNone(config.parse_volume_command("volume zero"))
+
+    def test_no_number_returns_none(self):
+        self.assertIsNone(config.parse_volume_command("volume up"))
+        self.assertIsNone(config.parse_volume_command("volume"))
+
+    def test_no_keyword_returns_none(self):
+        self.assertIsNone(config.parse_volume_command("play"))
+        self.assertIsNone(config.parse_volume_command("next track"))
+        self.assertIsNone(config.parse_volume_command("skip ahead 10"))
+
+    def test_empty_input_returns_none(self):
+        self.assertIsNone(config.parse_volume_command(""))
+        self.assertIsNone(config.parse_volume_command(None))
 
 
 class TestVoiceListener(unittest.TestCase):
@@ -111,6 +175,42 @@ class TestVoiceListener(unittest.TestCase):
         listener = StoppingListener(recognizer=FakeRecognizer("play"), source=FakeMicSource())
         listener._run_loop(calls.append, 1)
         self.assertEqual(calls, ["volume down", "volume down"])
+
+    def test_energy_threshold_applied_to_recognizer(self):
+        cfg = SimpleNamespace(
+            voice=SimpleNamespace(
+                timeout_seconds=5,
+                phrase_time_limit=3,
+                energy_threshold=120,
+                dynamic_energy_threshold=False,
+            )
+        )
+        with patch("voice_listener.config.get_config", return_value=cfg):
+            listener = VoiceListener(recognizer=FakeRecognizer("x"), source=FakeMicSource())
+        self.assertEqual(listener.recognizer.energy_threshold, 120)
+        self.assertEqual(listener.recognizer.dynamic_energy_threshold, False)
+
+    def test_energy_threshold_override_param(self):
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("x"),
+            source=FakeMicSource(),
+            energy_threshold=250,
+        )
+        self.assertEqual(listener.recognizer.energy_threshold, 250)
+
+    def test_capture_audio_records_requested_duration(self):
+        rec = _RecordRecognizer()
+        listener = VoiceListener(recognizer=rec, source=FakeMicSource())
+        audio = listener.capture_audio(duration=1.0)
+        self.assertEqual(rec.durations, [1.0])
+        self.assertEqual(audio.sample_rate, 16000)
+
+    def test_measure_energy_samples_per_interval(self):
+        rec = _RecordRecognizer()
+        listener = VoiceListener(recognizer=rec, source=FakeMicSource())
+        levels = listener.measure_energy(duration=1.0, interval=0.25)
+        self.assertEqual(rec.durations, [0.25, 0.25, 0.25, 0.25])
+        self.assertEqual(levels, [100.0] * 4)
 
 
 class _VoskRec:
@@ -215,6 +315,25 @@ class TestAudioDiagnostics(unittest.TestCase):
     def test_rms_of_constant_sample(self):
         self.assertAlmostEqual(voice_listener._rms(b"\x10\x00" * 100), 16.0, places=3)
 
+    def test_peak_of_silence_is_zero(self):
+        self.assertEqual(voice_listener._peak(b"\x00\x00" * 100), 0)
+
+    def test_peak_of_constant_sample(self):
+        self.assertEqual(voice_listener._peak(b"\x10\x00" * 100), 16)
+
+    def test_peak_of_mixed_samples(self):
+        raw = struct.pack("<3h", -300, 120, 2048)
+        self.assertEqual(voice_listener._peak(raw), 2048)
+
+    def test_log_audio_stats_reports_samples_and_threshold(self):
+        audio = _MultiChunkAudio(b"\x10\x00" * 800)
+        with self.assertLogs("voice_listener", level="DEBUG") as cm:
+            voice_listener._log_audio_stats(audio, energy_threshold=150)
+        text = "\n".join(cm.output)
+        self.assertIn("samples=800", text)
+        self.assertIn("rms=16", text)
+        self.assertIn("energy_threshold=150", text)
+
     def test_list_microphones_uses_pyaudio(self):
         class FakePa:
             def get_device_count(self):
@@ -254,8 +373,11 @@ class TestControllers(unittest.TestCase):
         "skip_backward",
         "volume_up",
         "volume_down",
+        "set_volume",
         "toggle_mute",
         "toggle_fullscreen",
+        "next",
+        "previous",
     )
 
     def test_all_controllers_expose_expected_actions(self):
@@ -282,6 +404,52 @@ class TestControllers(unittest.TestCase):
                 controller.play()
         mock_fallback.assert_called_once_with("play")
 
+    def test_mpc_next_sends_wm_command(self):
+        controller = MPCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.next()
+        self.assertEqual(mock_get.call_args[1]["params"], {"wm_command": 916})
+
+    def test_mpc_previous_sends_wm_command(self):
+        controller = MPCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.previous()
+        self.assertEqual(mock_get.call_args[1]["params"], {"wm_command": 915})
+
+    def test_mpc_set_volume_sends_volume_query(self):
+        controller = MPCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.set_volume(42)
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args[0][0], "http://localhost:13579/command.html")
+        self.assertEqual(mock_get.call_args[1]["params"], {"volume": 42})
+
+    def test_vlc_set_volume_sends_http_command(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.set_volume(75)
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args[0][0], "http://localhost:8080/requests/status.xml")
+        self.assertEqual(mock_get.call_args[1]["params"], {"command": "volume", "val": 75})
+
+    def test_vlc_set_volume_clamps_to_100(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.set_volume(500)
+        self.assertEqual(mock_get.call_args[1]["params"]["val"], 100)
+
+    def test_vlc_next_sends_pl_next(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.next()
+        self.assertEqual(mock_get.call_args[1]["params"], {"command": "pl_next"})
+
 
 class FakeVLC(PlayerController):
     name = "vlc"
@@ -289,12 +457,24 @@ class FakeVLC(PlayerController):
     def play(self):
         self.calls.append("vlc")
 
+    def set_volume(self, percent):
+        self.calls.append(("set_volume", percent))
+
+    def next(self):
+        self.calls.append("vlc next")
+
 
 class FakeMPC(PlayerController):
     name = "mpc-hc"
 
     def play(self):
         self.calls.append("mpc-hc")
+
+    def set_volume(self, percent):
+        self.calls.append(("set_volume", percent))
+
+    def next(self):
+        self.calls.append("mpc next")
 
 
 class TestAutoController(unittest.TestCase):
@@ -312,6 +492,19 @@ class TestAutoController(unittest.TestCase):
             auto.play()
         self.assertEqual(mpc.calls, ["mpc-hc"])
         self.assertEqual(vlc.calls, [])
+
+    def test_routes_set_volume_to_detected_player(self):
+        auto, vlc, mpc = self._auto_with_fakes()
+        with patch("player_control.detect_active_player", return_value="vlc"):
+            auto.set_volume(60)
+        self.assertEqual(vlc.calls, [("set_volume", 60)])
+        self.assertEqual(mpc.calls, [])
+
+    def test_routes_next_to_detected_player(self):
+        auto, vlc, mpc = self._auto_with_fakes()
+        with patch("player_control.detect_active_player", return_value="mpc-hc"):
+            auto.next()
+        self.assertEqual(mpc.calls, ["mpc next"])
 
     def test_warns_when_no_player_running(self):
         auto, vlc, mpc = self._auto_with_fakes()
@@ -563,6 +756,122 @@ class TestTTS(unittest.TestCase):
             tts.speak("one")
             tts.speak("two")
         self.assertEqual(fake_module.init.call_count, 1)
+
+
+class TestSyncTools(unittest.TestCase):
+    class _Recorder:
+        def __init__(self, peak=200):
+            self._peak = peak
+            self.duration = None
+
+        def capture_audio(self, duration):
+            self.duration = duration
+            return TestSyncTools._Audio(self._peak)
+
+    class _Audio:
+        sample_rate = 16000
+
+        def __init__(self, peak):
+            self._peak = peak
+
+        def get_raw_data(self):
+            return struct.pack("<4h", 0, 0, self._peak, -self._peak)
+
+        def get_wav_data(self):
+            return b"RIFF-fake-wav"
+
+    def test_record_test_saves_wav_and_prints_stats(self):
+        recorder = self._Recorder(peak=200)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("main.config_loader.PROJECT_ROOT", Path(tmp)):
+                with patch("main.play_wav_file", return_value=True) as mock_play:
+                    buffer = StringIO()
+                    with redirect_stdout(buffer):
+                        main.run_record_test(recorder, seconds=3.0)
+            saved = Path(tmp) / "test_audio.wav"
+            self.assertEqual(saved.read_bytes(), b"RIFF-fake-wav")
+        text = buffer.getvalue()
+        self.assertEqual(recorder.duration, 3.0)
+        self.assertIn("peak amplitude 200", text)
+        self.assertIn("test_audio.wav", text)
+        self.assertTrue(mock_play.called)
+
+    def test_energy_test_prints_suggestion(self):
+        class _Measurer:
+            def measure_energy(self, duration, interval):
+                self.duration = duration
+                self.interval = interval
+                return [16.0, 18.0, 20.0, 800.0]
+
+        measurer = _Measurer()
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.run_energy_test(measurer, duration=2.0, interval=0.5)
+        text = buffer.getvalue()
+        self.assertEqual((measurer.duration, measurer.interval), (2.0, 0.5))
+        self.assertIn("Suggested energy_threshold: 30", text)
+        self.assertIn("--set-energy 30", text)
+
+
+class _FakeVolumeController:
+    def __init__(self):
+        self.volume = None
+
+    def set_volume(self, percent):
+        self.volume = percent
+
+
+class TestNumericVolumeCommands(unittest.TestCase):
+    def _handle(self, text, controller=None):
+        controller = controller or _FakeVolumeController()
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
+        with patch("main.tts.speak") as mock_speak:
+            main.handle_command(_FakeStopListener(), controller, text, FAKE_LOG, tts_cfg)
+        return controller, mock_speak
+
+    def test_set_volume_command_sets_and_speaks(self):
+        controller, mock_speak = self._handle("set volume to 50")
+        self.assertEqual(controller.volume, 50)
+        mock_speak.assert_called_once_with(
+            "Volume set to 50", voice_id=None, engine="auto", fallback_enabled=True
+        )
+
+    def test_bare_volume_number(self):
+        controller, _ = self._handle("volume 100")
+        self.assertEqual(controller.volume, 100)
+
+    def test_out_of_range_is_clamped(self):
+        controller, mock_speak = self._handle("volume 150")
+        self.assertEqual(controller.volume, 100)
+        mock_speak.assert_called_once_with(
+            "Volume set to 100", voice_id=None, engine="auto", fallback_enabled=True
+        )
+
+    def test_relative_volume_uses_mapped_command(self):
+        controller = _FakeCommandController()
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        main.handle_command(_FakeStopListener(), controller, "volume up", FAKE_LOG, tts_cfg)
+        self.assertEqual(controller.calls, ["volume_up"])
+
+    def test_non_volume_text_ignored(self):
+        class Boom:
+            def set_volume(self, percent):
+                raise AssertionError("set_volume should not be called")
+
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        main.handle_command(_FakeStopListener(), Boom(), "hello there", FAKE_LOG, tts_cfg)
+
+    def test_set_volume_failure_speaks_command_failed(self):
+        class Boom:
+            def set_volume(self, percent):
+                raise RuntimeError("boom")
+
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
+        with patch("main.tts.speak") as mock_speak:
+            main.handle_command(_FakeStopListener(), Boom(), "set volume to 30", FAKE_LOG, tts_cfg)
+        mock_speak.assert_called_once_with(
+            "Command failed", voice_id=None, engine="auto", fallback_enabled=True
+        )
 
 
 class TestMainFeedback(unittest.TestCase):

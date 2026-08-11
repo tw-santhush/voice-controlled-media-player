@@ -120,10 +120,19 @@ class PlayerController:
     def volume_down(self, step=None):
         raise NotImplementedError
 
+    def set_volume(self, percent: int) -> None:
+        raise NotImplementedError
+
     def toggle_mute(self):
         raise NotImplementedError
 
     def toggle_fullscreen(self):
+        raise NotImplementedError
+
+    def next(self):
+        raise NotImplementedError
+
+    def previous(self):
         raise NotImplementedError
 
 
@@ -257,6 +266,40 @@ class VLCController(PlayerController):
             return
         self._report(f"volume_down (-{step})")
 
+    def set_volume(self, percent: int) -> None:
+        """Set the absolute volume (0-100) on the VLC HTTP interface."""
+        percent = max(0, min(100, int(round(float(percent)))))
+        if not self._check_enabled():
+            return
+        try:
+            self._http("volume", {"val": percent})
+        except requests.RequestException:
+            logger.exception("[vlc] HTTP set_volume failed")
+            return
+        self._report(f"set_volume ({percent})")
+
+    def next(self):
+        if not self._check_enabled():
+            return
+        try:
+            self._http("pl_next")
+        except requests.RequestException:
+            logger.exception("[vlc] HTTP next failed")
+            self._fallback("next")
+            return
+        self._report("next")
+
+    def previous(self):
+        if not self._check_enabled():
+            return
+        try:
+            self._http("pl_previous")
+        except requests.RequestException:
+            logger.exception("[vlc] HTTP previous failed")
+            self._fallback("previous")
+            return
+        self._report("previous")
+
     def toggle_mute(self):
         if not self._check_enabled():
             return
@@ -300,6 +343,8 @@ class MPCController(PlayerController):
         "volume_down": 908,
         "mute": 909,
         "fullscreen": 830,
+        "previous": 915,
+        "next": 916,
     }
 
     def __init__(
@@ -363,6 +408,27 @@ class MPCController(PlayerController):
 
     def volume_down(self, step=None):
         self._send("volume_down")
+
+    def set_volume(self, percent: int) -> None:
+        """Set the absolute volume (0-100) via the MPC-HC web interface."""
+        percent = max(0, min(100, int(round(float(percent)))))
+        if not self._check_enabled():
+            return
+        try:
+            response = self.session.get(
+                self.command_url, params={"volume": percent}, timeout=2
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            logger.exception("[mpc-hc] HTTP set_volume failed")
+            return
+        self._report(f"set_volume ({percent})")
+
+    def next(self):
+        self._send("next")
+
+    def previous(self):
+        self._send("previous")
 
     def toggle_mute(self):
         self._send("mute")
@@ -438,3 +504,12 @@ class AutoController:
 
     def toggle_fullscreen(self):
         self._route("toggle_fullscreen")
+
+    def set_volume(self, percent: int) -> None:
+        self._route("set_volume", percent)
+
+    def next(self):
+        self._route("next")
+
+    def previous(self):
+        self._route("previous")

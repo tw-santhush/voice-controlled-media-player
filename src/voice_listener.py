@@ -48,17 +48,34 @@ def _rms(raw: bytes) -> float:
     return (sum(s * s for s in samples) / len(samples)) ** 0.5
 
 
-def _log_audio_stats(audio) -> None:
+def _peak(raw: bytes) -> int:
+    """Return the peak (maximum absolute) 16-bit little-endian PCM sample."""
+    if not raw:
+        return 0
+    usable = len(raw) - (len(raw) % 2)
+    if usable == 0:
+        return 0
+    samples = struct.unpack(f"<{usable // 2}h", raw[:usable])
+    return max(abs(s) for s in samples) if samples else 0
+
+
+def _log_audio_stats(audio, energy_threshold=None) -> None:
     try:
         sample_rate = getattr(audio, "sample_rate", None)
         raw = audio.get_raw_data()
+        samples = len(raw) // 2
         duration = (len(raw) / (2 * sample_rate)) if sample_rate else 0.0
         amplitude = _rms(raw)
+        peak = _peak(raw)
         logger.debug(
-            "Audio stats: duration=%.2fs average_amplitude=%.0f sample_rate=%s",
+            "Audio stats: duration=%.2fs samples=%d sample_rate=%s rms=%.0f peak=%d "
+            "energy_threshold=%s",
             duration,
-            amplitude,
+            samples,
             sample_rate,
+            amplitude,
+            peak,
+            energy_threshold,
         )
     except Exception:
         logger.debug("Could not compute audio stats", exc_info=True)
@@ -147,6 +164,8 @@ class VoiceListener:
         recognizer_type="google",
         vosk_model_path=None,
         device_index=None,
+        energy_threshold=None,
+        dynamic_energy_threshold=None,
     ):
         if recognizer is None:
             _require_speech_recognition()
@@ -163,6 +182,18 @@ class VoiceListener:
         self.recognizer_type = recognizer_type or "google"
         self.vosk_model_path = Path(vosk_model_path) if vosk_model_path else DEFAULT_VOSK_MODEL_DIR
         self.device_index = device_index
+        self.energy_threshold = (
+            energy_threshold
+            if energy_threshold is not None
+            else getattr(cfg.voice, "energy_threshold", 300)
+        )
+        self.dynamic_energy_threshold = (
+            dynamic_energy_threshold
+            if dynamic_energy_threshold is not None
+            else getattr(cfg.voice, "dynamic_energy_threshold", True)
+        )
+        recognizer.energy_threshold = self.energy_threshold
+        recognizer.dynamic_energy_threshold = self.dynamic_energy_threshold
         self._model = None
         self._stop_event = threading.Event()
         self._thread = None
@@ -179,7 +210,8 @@ class VoiceListener:
                 _require_speech_recognition()
                 source = sr.Microphone(device_index=self.device_index)
             with source as mic:
-                self.recognizer.adjust_for_ambient_noise(mic, duration=0.5)
+                if self.dynamic_energy_threshold:
+                    self.recognizer.adjust_for_ambient_noise(mic, duration=0.5)
                 logger.debug(
                     "Audio energy: threshold=%s dynamic_threshold=%s",
                     getattr(self.recognizer, "energy_threshold", None),
@@ -192,7 +224,7 @@ class VoiceListener:
                     self.device_index,
                 )
                 audio = self.recognizer.listen(mic, timeout=timeout, phrase_time_limit=phrase_time_limit)
-            _log_audio_stats(audio)
+            _log_audio_stats(audio, getattr(self.recognizer, "energy_threshold", None))
             text = self._recognize(audio)
             logger.debug("Raw recognized text: %r", text)
             return text.strip().lower()
@@ -207,6 +239,39 @@ class VoiceListener:
         except Exception as exc:
             logger.exception("Unexpected error during voice recognition: %s", exc)
             return None
+
+    def capture_audio(self, duration: float = 3.0):
+        """Record raw audio for `duration` seconds and return the SpeechRecognition AudioData.
+
+        No speech detection or ambient-noise adjustment is applied; this captures
+        whatever the microphone hears (used by --record-test).
+        """
+        _require_speech_recognition()
+        source = self.source
+        if source is None:
+            source = sr.Microphone(device_index=self.device_index)
+        with source as mic:
+            return self.recognizer.record(mic, duration=duration)
+
+    def measure_energy(self, duration: float = 5.0, interval: float = 0.5) -> list[float]:
+        """Sample the RMS energy of the microphone every `interval` seconds over `duration`.
+
+        Returns one RMS reading per interval so callers can tune the
+        recognizer's energy_threshold (used by --energy-test).
+        """
+        _require_speech_recognition()
+        source = self.source
+        if source is None:
+            source = sr.Microphone(device_index=self.device_index)
+        energies: list[float] = []
+        with source as mic:
+            elapsed = 0.0
+            while elapsed < duration:
+                chunk = min(interval, duration - elapsed)
+                audio = self.recognizer.record(mic, duration=chunk)
+                energies.append(_rms(audio.get_raw_data()))
+                elapsed += chunk
+        return energies
 
     def _recognize(self, audio) -> str:
         if self.recognizer_type in ("vosk", "auto"):
