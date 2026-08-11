@@ -1,5 +1,16 @@
+# Voice recognition
 SpeechRecognition
+
+# Required by SpeechRecognition for microphone input.
+# On Windows, install the wheel matching your Python version if pip cannot find one.
 pyaudio
+
+# HTTP control of VLC and MPC-HC web interfaces
 requests
+
+# Keyboard shortcut fallback when HTTP control is unavailable.
+# Note: on Windows, global shortcuts may require running as administrator.
 keyboard
+
+# Optional native VLC bindings (not required for HTTP control)
 python-vlc

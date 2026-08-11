@@ -58,6 +58,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# Runtime app data
+app.log
+
+# Local user configuration (may contain passwords)
+config.json
+
 # IDE
 .vscode/
 .idea/
