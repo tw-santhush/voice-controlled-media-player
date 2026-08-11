@@ -25,6 +25,10 @@ DEFAULT_CONFIG = {
         "timeout_seconds": 5,
         "phrase_time_limit": 3,
     },
+    "recognizer": {
+        "engine": "auto",
+        "vosk_model_path": None,
+    },
     "player": {
         "default_skip_seconds": 10,
         "volume_step": 5,

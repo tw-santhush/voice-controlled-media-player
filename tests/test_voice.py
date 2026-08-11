@@ -1,9 +1,12 @@
+import json
 import logging
 import os
 import sys
 import time
 import types
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -14,12 +17,16 @@ import main
 import requests
 import speech_recognition as sr
 import tts
+import voice_listener
 from player_control import AutoController, MPCController, PlayerController, VLCController
 from voice_listener import VoiceListener
 
 
 class FakeAudio:
-    pass
+    sample_rate = 16000
+
+    def get_raw_data(self):
+        return b"\x00\x00" * 1600
 
 
 class FakeRecognizer:
@@ -104,6 +111,138 @@ class TestVoiceListener(unittest.TestCase):
         listener = StoppingListener(recognizer=FakeRecognizer("play"), source=FakeMicSource())
         listener._run_loop(calls.append, 1)
         self.assertEqual(calls, ["volume down", "volume down"])
+
+
+class _VoskRec:
+    def __init__(self, text):
+        self._text = text
+
+    def AcceptWaveform(self, data):
+        return True
+
+    def FinalResult(self):
+        return json.dumps({"text": self._text})
+
+
+def _make_fake_vosk(text="hey player play"):
+    module = types.ModuleType("vosk")
+    module.Model = lambda path: object()
+
+    def kaldi(model, sample_rate):
+        return _VoskRec(text)
+
+    module.KaldiRecognizer = kaldi
+    return module
+
+
+def _vosk_listener(text="hey player play", recognizer_type="vosk", **kwargs):
+    fake = _make_fake_vosk(text)
+    listener = VoiceListener(
+        recognizer=FakeRecognizer("google fallback"),
+        source=FakeMicSource(),
+        recognizer_type=recognizer_type,
+        vosk_model_path="fake-model",
+        **kwargs,
+    )
+    patchers = [
+        patch.dict(sys.modules, {"vosk": fake}),
+        patch("voice_listener._ensure_vosk_model", return_value="fake-model"),
+    ]
+    for p in patchers:
+        p.start()
+    return listener, patchers
+
+
+class TestRecognizerSelection(unittest.TestCase):
+    def test_default_uses_google(self):
+        listener = VoiceListener(recognizer=FakeRecognizer("volume up"), source=FakeMicSource())
+        self.assertEqual(listener.recognizer_type, "google")
+        self.assertEqual(listener.listen_once(), "volume up")
+
+    def test_vosk_used_when_recognizer_type_vosk(self):
+        listener, patchers = _vosk_listener("hey player play")
+        try:
+            self.assertEqual(listener.listen_once(), "hey player play")
+        finally:
+            for p in patchers:
+                p.stop()
+
+    def test_auto_tries_vosk_first(self):
+        listener, patchers = _vosk_listener("hey player pause", recognizer_type="auto")
+        try:
+            self.assertEqual(listener.listen_once(), "hey player pause")
+        finally:
+            for p in patchers:
+                p.stop()
+
+    def test_vosk_missing_falls_back_to_google(self):
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("volume up"),
+            source=FakeMicSource(),
+            recognizer_type="vosk",
+            vosk_model_path="fake-model",
+        )
+        with patch.dict(sys.modules, {"vosk": None}):
+            self.assertEqual(listener.listen_once(), "volume up")
+
+    def test_vosk_model_missing_falls_back_to_google(self):
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("play"),
+            source=FakeMicSource(),
+            recognizer_type="auto",
+            vosk_model_path="fake-model",
+        )
+        with patch.dict(sys.modules, {"vosk": _make_fake_vosk()}):
+            with patch(
+                "voice_listener._ensure_vosk_model",
+                side_effect=LookupError("no model"),
+            ):
+                self.assertEqual(listener.listen_once(), "play")
+
+    def test_vosk_empty_result_falls_back_to_google(self):
+        listener, patchers = _vosk_listener("", recognizer_type="vosk")
+        try:
+            self.assertEqual(listener.listen_once(), "google fallback")
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class TestAudioDiagnostics(unittest.TestCase):
+    def test_rms_of_silence_is_zero(self):
+        self.assertEqual(voice_listener._rms(b"\x00\x00" * 100), 0.0)
+
+    def test_rms_of_constant_sample(self):
+        self.assertAlmostEqual(voice_listener._rms(b"\x10\x00" * 100), 16.0, places=3)
+
+    def test_list_microphones_uses_pyaudio(self):
+        class FakePa:
+            def get_device_count(self):
+                return 3
+
+            def get_device_info_by_index(self, i):
+                infos = [
+                    {"maxInputChannels": 2, "name": "Mic A", "defaultSampleRate": 44100},
+                    {"maxInputChannels": 0, "name": "Speakers", "defaultSampleRate": 44100},
+                    {"maxInputChannels": 1, "name": "Webcam Mic", "defaultSampleRate": 48000},
+                ]
+                return infos[i]
+
+        fake_module = types.ModuleType("pyaudio")
+        fake_module.PyAudio = lambda: FakePa()
+        with patch.dict(sys.modules, {"pyaudio": fake_module}):
+            mics = voice_listener.list_microphones()
+        self.assertEqual([m["index"] for m in mics], [0, 2])
+        self.assertEqual(mics[0]["name"], "Mic A")
+        self.assertEqual(mics[1]["sample_rate"], 48000)
+
+    def test_list_microphones_returns_empty_without_audio(self):
+        with patch.dict(sys.modules, {"pyaudio": None, "speech_recognition": None}):
+            self.assertEqual(voice_listener.list_microphones(), [])
+
+    def test_device_index_is_stored(self):
+        listener = VoiceListener(recognizer=FakeRecognizer("x"), source=FakeMicSource(), device_index=2)
+        self.assertEqual(listener.device_index, 2)
 
 
 class TestControllers(unittest.TestCase):
@@ -296,6 +435,70 @@ class TestWakeIntegration(unittest.TestCase):
         listener, controller, tts_cfg, wake_cfg, state = self._setup(wake_enabled=False)
         main.process_recognized(listener, controller, "play", FAKE_LOG, tts_cfg, wake_cfg, state)
         self.assertEqual(controller.calls, ["play"])
+
+
+class TestWakeConfig(unittest.TestCase):
+    def _cfg(self, enabled=True):
+        return SimpleNamespace(
+            wake=SimpleNamespace(enabled=enabled, phrases=["hey player"], timeout_seconds=3)
+        )
+
+    def test_wake_enabled_by_default(self):
+        args = SimpleNamespace(single=False, no_wake=False)
+        cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.phrases, ["hey player"])
+
+    def test_single_mode_disables_wake(self):
+        args = SimpleNamespace(single=True, no_wake=False)
+        cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
+        self.assertFalse(cfg.enabled)
+
+    def test_no_wake_flag_disables_wake(self):
+        args = SimpleNamespace(single=False, no_wake=True)
+        cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
+        self.assertFalse(cfg.enabled)
+
+
+class TestWakeTrainingAnalysis(unittest.TestCase):
+    def test_all_matched_is_consistent(self):
+        lines = main.analyze_wake_training(["hey player", "hey player"], ["hey player"])
+        self.assertTrue(any("consistent" in line for line in lines))
+
+    def test_no_speech_suggests_mic_check(self):
+        lines = main.analyze_wake_training([], ["hey player"])
+        self.assertTrue(any("--list-mics" in line for line in lines))
+
+    def test_none_matched_suggests_alternatives(self):
+        lines = main.analyze_wake_training(["go forward", "advance"], ["hey player"])
+        self.assertTrue(any("0/2" in line for line in lines))
+        self.assertTrue(any("vosk" in line or "player" in line for line in lines))
+
+    def test_partial_match_reports_inconsistency(self):
+        lines = main.analyze_wake_training(
+            ["hey player play", "hey player pause", "just nonsense"], ["hey player"]
+        )
+        self.assertTrue(any("2/3" in line for line in lines))
+        self.assertTrue(any("inconsist" in line for line in lines))
+
+    def test_run_wake_training_prints_results(self):
+        class FakeListener:
+            def __init__(self):
+                self.index = 0
+
+            def listen_once(self):
+                texts = ["hey player"] * 5
+                self.index += 1
+                return texts[self.index - 1]
+
+        fake_config = SimpleNamespace(wake=SimpleNamespace(phrases=["hey player"]))
+        buffer = StringIO()
+        with patch("main.config.get_config", return_value=fake_config):
+            with redirect_stdout(buffer):
+                main.run_wake_training(FakeListener(), repetitions=5)
+        out = buffer.getvalue()
+        self.assertIn("Heard: 'hey player'", out)
+        self.assertIn("consistent", out)
 
 
 class TestTTS(unittest.TestCase):

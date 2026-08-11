@@ -17,3 +17,8 @@ python-vlc
 
 # Optional: offline text-to-speech feedback (speaks commands aloud)
 pyttsx3
+
+# Optional: offline, open-source speech recognition (--recognizer vosk).
+# Also downloads a small English model on first use (~50 MB) into ~/.cache/vosk
+# unless the vosk_model_path config value points at an existing model.
+# vosk

@@ -69,6 +69,11 @@ python src/main.py --player auto --continuous
 | `--tts-engine` | TTS backend: `auto` (default), `pyttsx3`, `powershell`, `say`, `espeak`, or `system`. |
 | `--no-wake`    | Disable the wake-word requirement (overrides config).           |
 | `--debug`      | Enable debug logging (raw recognized text, mic details, audio levels). |
+| `--recognizer` | Speech recognizer: `google` (online), `vosk` (offline), or `auto` (default: config or auto). |
+| `--mic-index`  | Microphone device index to use (list them with `--list-mics`).  |
+| `--list-mics`  | List all available microphones (via pyaudio) and exit.          |
+| `--test-tts`   | Speak a test phrase with the configured TTS engine, then exit (no microphone needed). |
+| `--train-wake` | Listen to 5 repetitions of your wake phrase and analyze how well it is recognized. |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -79,8 +84,8 @@ Before running, diagnose your environment:
 python src/main.py --check-deps
 ```
 
-It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, and `python-vlc` are available,
-and tests the TTS setup (it speaks a short test phrase if TTS works).
+It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, `python-vlc`, `vosk`, and `pyttsx3`
+are available, and tests the TTS setup (it speaks a short test phrase if TTS works).
 
 ## Configuration
 
@@ -100,6 +105,7 @@ To customize:
    | `vlc`              | VLC host, HTTP port, password, and whether VLC control is enabled        |
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
    | `voice`            | Listening timeout and phrase time limit (seconds)                        |
+   | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
    | `player`           | Default skip seconds and volume step                                     |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
    | `commands`         | Spoken phrases → action mappings for voice commands                      |
@@ -187,6 +193,75 @@ python src/main.py --player vlc --single --no-wake
 
 Enable/disable TTS exactly as above or in `config.json`.
 
+## Speech Recognition
+
+Recognition defaults to Google (online). For fully offline recognition you can use **Vosk**, an open-source
+model-based engine that works without internet — often a good fit when Google mishears your accent or commands.
+
+```json
+"recognizer": {
+    "engine": "auto",
+    "vosk_model_path": null
+}
+```
+
+- `engine`: `google`, `vosk`, or `auto` (`auto` tries Vosk first and falls back to Google).
+- `vosk_model_path`: path to a local Vosk model. If `null`, the app auto-downloads the small English model
+  (`vosk-model-small-en-us-0.15`, ~50 MB) into `~/.cache/vosk/model-en-us` on first use.
+
+### Vosk setup
+
+1. Install the library (optional — Google still works without it):
+   ```bash
+   pip install vosk
+   ```
+2. Run once with Vosk to download the model automatically, or provide your own:
+   ```bash
+   python src/main.py --recognizer vosk --player auto --single
+   # or point config.json at an existing model:
+   # "vosk_model_path": "C:/models/vosk-model-small-en-us-0.15"
+   ```
+3. If Vosk is not installed (or the model download fails), the app logs a warning and falls back to Google.
+
+### Verify your microphone
+
+```bash
+# List every audio input device and its index
+python src/main.py --list-mics
+
+# Use a specific mic if you have several
+python src/main.py --mic-index 1
+
+# Confirm audio is being captured (watch for high amplitude when you speak)
+python src/main.py --debug
+```
+
+### Test text-to-speech
+
+Speaks a test phrase through the configured TTS engine and exits. No microphone is needed, so it is the quickest
+way to confirm TTS is set up correctly:
+
+```bash
+python src/main.py --test-tts
+```
+
+## Wake Phrase Training
+
+If the recognizer keeps missing your wake phrase, train it:
+
+```bash
+python src/main.py --train-wake
+```
+
+It listens for 5 repetitions of your wake phrase, prints exactly what the recognizer heard each time, and suggests
+shorter or more distinctive alternatives when recognition is inconsistent. Run it with `--debug` or
+`--recognizer vosk` for extra insight.
+
+### Single-command mode
+
+`--single` disables the wake word automatically, so a bare command like "play" is processed directly — ideal for
+quick testing. Use `--no-wake` to get the same behavior explicitly.
+
 ## Project Structure
 
 ```
@@ -209,3 +284,6 @@ Enable/disable TTS exactly as above or in `config.json`.
 - **`Could not understand the audio`** → The microphone picked up speech but recognition failed. Raise the
   `voice.timeout_seconds` value, move closer to the mic, reduce background noise, and run with `--debug` to see the
   raw recognized text and audio energy levels — this shows whether your speech was even received.
+- **`Vosk model download` fails** → The ~50 MB model is fetched from `alphacephei.com` on first `vosk` use. If the
+  download fails or you are offline, download `vosk-model-small-en-us-0.15.zip` yourself, unzip it, and set
+  `vosk_model_path` in the `recognizer` config section to the unzipped folder.

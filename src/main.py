@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import logging
 import sys
 import time
@@ -40,10 +41,16 @@ try:
 except (ImportError, OSError):
     HAS_PYTHON_VLC = False
 
+try:
+    import vosk  # noqa: F401
+    HAS_VOSK = True
+except (ImportError, OSError):
+    HAS_VOSK = False
+
 import config
 import player_control
 import tts
-from voice_listener import VoiceListener
+from voice_listener import VoiceListener, list_microphones
 
 LOG_FILE = "app.log"
 
@@ -92,6 +99,7 @@ def dependency_report() -> list[str]:
         ("keyboard", HAS_KEYBOARD, "pip install keyboard  (optional: HTTP control works without it)"),
         ("pyttsx3", HAS_TTS, "pip install pyttsx3  (optional: text-to-speech feedback)"),
         ("python-vlc", HAS_PYTHON_VLC, "pip install python-vlc  (optional)"),
+        ("vosk", HAS_VOSK, "pip install vosk  (optional: offline recognition, --recognizer vosk)"),
     ]
     lines = ["Dependency status:"]
     for name, installed, hint in statuses:
@@ -228,6 +236,69 @@ def run_once(listener: VoiceListener, controller, log: logging.Logger, tts_cfg, 
     process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
 
 
+def build_wake_cfg(args, cfg, log) -> SimpleNamespace:
+    """Build the wake-word config from CLI args and config; disable wake in --single mode."""
+    enabled = cfg.wake.enabled and not args.no_wake
+    if args.single:
+        if enabled:
+            log.info("Single-command mode disables the wake word automatically")
+        enabled = False
+    return SimpleNamespace(
+        enabled=enabled,
+        phrases=list(cfg.wake.phrases),
+        timeout_seconds=cfg.wake.timeout_seconds,
+    )
+
+
+def analyze_wake_training(heard: list[str], phrases: list[str]) -> list[str]:
+    """Review recorded wake phrase repetitions and return suggestion lines."""
+    lines: list[str] = []
+    if not heard:
+        lines.append("No speech was recognized in any attempt.")
+        lines.append("Make sure your microphone works (try --list-mics) and speak clearly.")
+        return lines
+
+    matched = sum(1 for text in heard if config.detect_wake_phrase(text, phrases)[0])
+    lines.append(f"Wake phrase recognized {matched}/{len(heard)} times.")
+    if matched == len(heard):
+        lines.append("Recognition is consistent - your current wake phrase is fine.")
+        return lines
+
+    close = []
+    for phrase in phrases:
+        for text in heard:
+            ratio = difflib.SequenceMatcher(None, phrase, text).ratio()
+            if 0.55 <= ratio < 1.0:
+                close.append((phrase, text, ratio))
+    for phrase, text, ratio in sorted(close, key=lambda item: -item[2]):
+        lines.append(f"  Saying {phrase!r} is usually heard as {text!r} ({ratio:.0%} similar).")
+
+    if matched == 0:
+        lines.append("No repetition matched a wake phrase. Try a shorter, more distinctive phrase")
+        lines.append("(like 'player'), or switch offline recognition with --recognizer vosk.")
+    else:
+        lines.append("Results are inconsistent. Speak more clearly or shorten the wake phrase.")
+    return lines
+
+
+def run_wake_training(listener: VoiceListener, repetitions: int = 5) -> None:
+    """Listen to several wake phrase repetitions and print recognition results."""
+    print("Wake phrase training: say your wake phrase five times.")
+    heard: list[str] = []
+    for i in range(1, repetitions + 1):
+        print(f"  Repetition {i}/{repetitions} - speak now...")
+        text = listener.listen_once()
+        if text:
+            heard.append(text)
+            print(f"    Heard: {text!r}")
+        else:
+            print("    Nothing heard; try again.")
+    print()
+    print("Wake phrase training results:")
+    for line in analyze_wake_training(heard, list(config.get_config().wake.phrases)):
+        print(f"  {line}")
+
+
 def main(argv: list[str] | None = None) -> None:
     log = setup_logging()
     parser = argparse.ArgumentParser(description="Voice-controlled media player")
@@ -284,6 +355,33 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Force a specific TTS engine (default: config or auto)",
     )
+    parser.add_argument(
+        "--recognizer",
+        choices=["google", "vosk", "auto"],
+        default=None,
+        help="Speech recognizer: google, vosk (offline), or auto (default: config or auto)",
+    )
+    parser.add_argument(
+        "--mic-index",
+        type=int,
+        default=None,
+        help="Microphone device index to use (see --list-mics)",
+    )
+    parser.add_argument(
+        "--list-mics",
+        action="store_true",
+        help="List available microphone devices using pyaudio, then exit",
+    )
+    parser.add_argument(
+        "--test-tts",
+        action="store_true",
+        help="Speak a test phrase with the configured TTS engine, then exit",
+    )
+    parser.add_argument(
+        "--train-wake",
+        action="store_true",
+        help="Listen to 5 repetitions of your wake phrase and analyze recognition",
+    )
     args = parser.parse_args(argv)
 
     if args.debug:
@@ -302,10 +400,16 @@ def main(argv: list[str] | None = None) -> None:
         print("TTS speak test:", "OK" if ok else "FAILED (see logs)")
         return
 
-    check_required_dependencies(log)
-
-    if args.single:
-        args.continuous = False
+    if args.list_mics:
+        mics = list_microphones()
+        if not mics:
+            print("No microphones found.")
+        else:
+            print("Available microphones:")
+            for mic in mics:
+                rate = f" ({mic['sample_rate']} Hz)" if mic.get("sample_rate") else ""
+                print(f"  [{mic['index']}] {mic['name']}{rate}")
+        return
 
     tts_enabled = cfg.tts.enabled
     if args.tts:
@@ -314,25 +418,48 @@ def main(argv: list[str] | None = None) -> None:
         tts_enabled = False
     if args.tts and args.no_tts:
         log.warning("Both --tts and --no-tts given; --no-tts wins")
-    if tts_enabled and not HAS_TTS and args.tts_engine in (None, "auto", "pyttsx3"):
-        log.warning("tts is enabled in config but pyttsx3 is not installed; install with: pip install pyttsx3")
     tts_cfg = SimpleNamespace(
         enabled=tts_enabled,
         voice_id=cfg.tts.voice_id,
         engine=args.tts_engine or getattr(cfg.tts, "engine", "auto"),
         fallback_enabled=getattr(cfg.tts, "fallback_enabled", True),
     )
-    wake_cfg = SimpleNamespace(
-        enabled=cfg.wake.enabled and not args.no_wake,
-        phrases=list(cfg.wake.phrases),
-        timeout_seconds=cfg.wake.timeout_seconds,
-    )
+
+    if args.test_tts:
+        tts_log = logging.getLogger("tts")
+        ok = tts.speak(
+            "Testing one two three",
+            voice_id=tts_cfg.voice_id,
+            engine=tts_cfg.engine,
+            fallback_enabled=tts_cfg.fallback_enabled,
+        )
+        tts_log.info("TTS test: %s", "OK" if ok else "FAILED")
+        print("TTS test:", "OK" if ok else "FAILED (see logs for details)")
+        return
+
+    if args.single:
+        args.continuous = False
+
+    wake_cfg = build_wake_cfg(args, cfg, log)
+
+    if tts_enabled and not HAS_TTS and args.tts_engine in (None, "auto", "pyttsx3"):
+        log.warning("tts is enabled in config but pyttsx3 is not installed; install with: pip install pyttsx3")
+
+    check_required_dependencies(log)
 
     controller = build_controller(args.player)
+    recognizer_type = args.recognizer or getattr(cfg.recognizer, "engine", "auto")
     listener = VoiceListener(
         timeout=cfg.voice.timeout_seconds,
         phrase_time_limit=cfg.voice.phrase_time_limit,
+        recognizer_type=recognizer_type,
+        vosk_model_path=getattr(cfg.recognizer, "vosk_model_path", None),
+        device_index=args.mic_index,
     )
+
+    if args.train_wake:
+        run_wake_training(listener)
+        return
 
     if args.debug:
         mic_info = listener.get_microphone_info()
@@ -346,8 +473,12 @@ def main(argv: list[str] | None = None) -> None:
 
     state = {"armed": False, "armed_at": 0.0}
 
-    log.info("Starting voice-controlled media player (player=%s)", args.player)
-    print(f"Listening... player={args.player}. Press Ctrl+C to stop.")
+    log.info(
+        "Starting voice-controlled media player (player=%s, recognizer=%s)",
+        args.player,
+        recognizer_type,
+    )
+    print(f"Listening... player={args.player} recognizer={recognizer_type}. Press Ctrl+C to stop.")
 
     try:
         if args.continuous:
