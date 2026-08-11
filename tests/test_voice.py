@@ -186,33 +186,39 @@ class TestAutoController(unittest.TestCase):
 
 class TestWakePhraseHelpers(unittest.TestCase):
     def test_detects_phrase_in_text(self):
-        self.assertEqual(
-            config.detect_wake_phrase("hey player play", ["hey player", "player"]),
-            "hey player",
-        )
+        phrase, remainder = config.detect_wake_phrase("hey player play", ["hey player", "player"])
+        self.assertEqual(phrase, "hey player")
+        self.assertEqual(remainder, "play")
 
     def test_detects_shortest_phrase_too(self):
-        self.assertEqual(
-            config.detect_wake_phrase("player volume up", ["hey player", "player"]),
-            "player",
-        )
+        phrase, remainder = config.detect_wake_phrase("player volume up", ["hey player", "player"])
+        self.assertEqual(phrase, "player")
+        self.assertEqual(remainder, "volume up")
 
     def test_detects_none_when_absent(self):
-        self.assertIsNone(config.detect_wake_phrase("just play", ["hey player"]))
-        self.assertIsNone(config.detect_wake_phrase("", ["hey player"]))
-        self.assertIsNone(config.detect_wake_phrase("play", []))
+        self.assertEqual(config.detect_wake_phrase("just play", ["hey player"]), (None, "just play"))
+        self.assertEqual(config.detect_wake_phrase("", ["hey player"]), (None, ""))
+        self.assertEqual(config.detect_wake_phrase("play", []), (None, "play"))
 
-    def test_strip_phrase_from_front(self):
-        self.assertEqual(config.strip_phrase("hey player play", "hey player"), "play")
+    def test_longest_match_wins(self):
+        phrase, remainder = config.detect_wake_phrase("hello player play", ["player", "hello player"])
+        self.assertEqual(phrase, "hello player")
+        self.assertEqual(remainder, "play")
 
-    def test_strip_phrase_missing_returns_text(self):
-        self.assertEqual(config.strip_phrase("play", "hey player"), "play")
+    def test_phrase_requires_word_boundaries(self):
+        phrase, remainder = config.detect_wake_phrase("playerunknown play", ["player"])
+        self.assertIsNone(phrase)
+        self.assertEqual(remainder, "playerunknown play")
 
-    def test_strip_phrase_is_case_insensitive(self):
-        self.assertEqual(
-            config.strip_phrase("Hey Player play volume up", "hey player"),
-            "play volume up",
-        )
+    def test_punctuation_and_prefix_words_ok(self):
+        phrase, remainder = config.detect_wake_phrase("um, hey player - play", ["hey player", "player"])
+        self.assertEqual(phrase, "hey player")
+        self.assertEqual(remainder, "um play")
+
+    def test_case_insensitive(self):
+        phrase, remainder = config.detect_wake_phrase("HEY PLAYER play volume up", ["hey player"])
+        self.assertEqual(phrase, "hey player")
+        self.assertEqual(remainder, "play volume up")
 
 
 FAKE_LOG = logging.getLogger("test")
@@ -244,7 +250,7 @@ class TestWakeIntegration(unittest.TestCase):
     def _setup(self, wake_enabled=True):
         controller = _FakeCommandController()
         listener = _FakeStopListener()
-        tts_cfg = SimpleNamespace(enabled=False, voice_id=None)
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
         wake_cfg = SimpleNamespace(
             enabled=wake_enabled,
             phrases=["hey player", "hello player", "player"],
@@ -308,14 +314,42 @@ class TestTTS(unittest.TestCase):
 
     def test_speak_missing_pyttsx3_returns_false(self):
         with patch.dict(sys.modules, {"pyttsx3": None}):
-            result = tts.speak("Playing")
+            result = tts.speak("Playing", fallback_enabled=False)
         self.assertFalse(result)
 
     def test_speak_engine_init_failure_returns_false(self):
         fake_module = types.ModuleType("pyttsx3")
         fake_module.init = MagicMock(side_effect=RuntimeError("no audio driver"))
         with patch.dict(sys.modules, {"pyttsx3": fake_module}):
-            result = tts.speak("Playing")
+            result = tts.speak("Playing", fallback_enabled=False)
+        self.assertFalse(result)
+
+    def test_speak_uses_system_fallback_when_pyttsx3_missing(self):
+        with patch.dict(sys.modules, {"pyttsx3": None}):
+            with patch("tts.os.name", "nt"):
+                with patch("tts.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+                    result = tts.speak("Playing")
+        self.assertTrue(result)
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0][0], "powershell")
+
+    def test_speak_no_fallback_when_disabled(self):
+        with patch.dict(sys.modules, {"pyttsx3": None}):
+            with patch("tts.os.name", "nt"):
+                result = tts.speak("Playing", fallback_enabled=False)
+        self.assertFalse(result)
+
+    def test_speak_force_specific_engine(self):
+        with patch("tts._powershell_speak", return_value=True) as mock_ps:
+            result = tts.speak("Playing", engine="powershell")
+        self.assertTrue(result)
+        mock_ps.assert_called_once_with("Playing")
+
+    def test_speak_fallback_failure_returns_false(self):
+        with patch.dict(sys.modules, {"pyttsx3": None}):
+            with patch("tts.os.name", "nt"):
+                with patch("tts.subprocess.run", side_effect=OSError("no powershell")):
+                    result = tts.speak("Playing")
         self.assertFalse(result)
 
     def test_engine_is_singleton(self):
@@ -331,10 +365,10 @@ class TestTTS(unittest.TestCase):
 class TestMainFeedback(unittest.TestCase):
     def test_handle_command_speaks_feedback_after_success(self):
         controller = _FakeCommandController()
-        tts_cfg = SimpleNamespace(enabled=True, voice_id=None)
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
         with patch("main.tts.speak") as mock_speak:
             main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg)
-        mock_speak.assert_called_once_with("Playing", voice_id=None)
+        mock_speak.assert_called_once_with("Playing", voice_id=None, engine="auto", fallback_enabled=True)
         self.assertEqual(controller.calls, ["play"])
 
     def test_handle_command_speaks_command_failed_on_error(self):
@@ -342,22 +376,22 @@ class TestMainFeedback(unittest.TestCase):
             def play(self):
                 raise RuntimeError("boom")
 
-        tts_cfg = SimpleNamespace(enabled=True, voice_id=None)
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
         with patch("main.tts.speak") as mock_speak:
             main.handle_command(_FakeStopListener(), BoomController(), "play", FAKE_LOG, tts_cfg)
-        mock_speak.assert_called_once_with("Command failed")
+        mock_speak.assert_called_once_with("Command failed", voice_id=None, engine="auto", fallback_enabled=True)
 
     def test_handle_command_exit_stops_listener_and_speaks(self):
         listener = _FakeStopListener()
-        tts_cfg = SimpleNamespace(enabled=True, voice_id=None)
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
         with patch("main.tts.speak") as mock_speak:
             main.handle_command(listener, None, "exit", FAKE_LOG, tts_cfg)
-        mock_speak.assert_called_once_with("Exiting", voice_id=None)
+        mock_speak.assert_called_once_with("Exiting", voice_id=None, engine="auto", fallback_enabled=True)
         self.assertTrue(listener.stopped)
 
     def test_tts_disabled_does_not_speak(self):
         controller = _FakeCommandController()
-        tts_cfg = SimpleNamespace(enabled=False, voice_id=None)
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
         with patch("main.tts.speak") as mock_speak:
             main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg)
         mock_speak.assert_not_called()

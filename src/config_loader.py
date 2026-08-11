@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "tts": {
         "enabled": True,
         "voice_id": None,
+        "engine": "auto",
+        "fallback_enabled": True,
     },
     "wake": {
         "enabled": True,

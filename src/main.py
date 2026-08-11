@@ -124,6 +124,13 @@ def check_required_dependencies(log: logging.Logger) -> None:
         log.warning("keyboard module is missing; falling back to HTTP-only control. Optional install: pip install keyboard")
 
 
+def check_tts_engine(engine: str) -> bool:
+    logger = logging.getLogger("tts")
+    result = tts.speak("test", engine=engine, fallback_enabled=True)
+    logger.info("TTS speak test with engine=%s: %s", engine, "OK" if result else "FAILED")
+    return result
+
+
 def build_controller(player: str) -> player_control.PlayerController:
     cfg = config.get_config()
     if player == "vlc":
@@ -141,11 +148,21 @@ def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False) -> 
     if not tts_cfg.enabled:
         return
     if failed:
-        tts.speak("Command failed")
+        tts.speak(
+            "Command failed",
+            voice_id=tts_cfg.voice_id,
+            engine=tts_cfg.engine,
+            fallback_enabled=tts_cfg.fallback_enabled,
+        )
         return
     phrase = TTS_PHRASES.get(action) if action else None
     if phrase:
-        tts.speak(phrase, voice_id=tts_cfg.voice_id)
+        tts.speak(
+            phrase,
+            voice_id=tts_cfg.voice_id,
+            engine=tts_cfg.engine,
+            fallback_enabled=tts_cfg.fallback_enabled,
+        )
 
 
 def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg) -> None:
@@ -184,12 +201,10 @@ def process_recognized(listener, controller, text: str, log: logging.Logger, tts
                 handle_command(listener, controller, text, log, tts_cfg)
                 return
 
-        phrase = config.detect_wake_phrase(text, wake_cfg.phrases)
-        if not phrase:
+        phrase, remainder = config.detect_wake_phrase(text, wake_cfg.phrases)
+        if phrase is None:
             log.info("Ignored speech without wake phrase: %r", text)
             return
-        log.info("Wake phrase detected: %r", phrase)
-        remainder = config.strip_phrase(text, phrase)
         if not remainder:
             state["armed"] = True
             state["armed_at"] = now
@@ -198,6 +213,7 @@ def process_recognized(listener, controller, text: str, log: logging.Logger, tts
                 wake_cfg.timeout_seconds,
             )
             return
+        log.debug("Executing command from wake remainder: %r", remainder)
         handle_command(listener, controller, remainder, log, tts_cfg)
         return
 
@@ -257,21 +273,39 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Disable the wake-word requirement (overrides config)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose DEBUG logging and microphone diagnostics",
+    )
+    parser.add_argument(
+        "--tts-engine",
+        choices=["auto", "pyttsx3", "powershell", "say", "espeak", "system"],
+        default=None,
+        help="Force a specific TTS engine (default: config or auto)",
+    )
     args = parser.parse_args(argv)
+
+    if args.debug:
+        log.info("Debug mode enabled")
+        logging.getLogger().setLevel(logging.DEBUG)
 
     if args.config:
         config.get_config(config_path=args.config)
 
+    cfg = config.get_config()
+
     if args.check_deps:
         print_check_deps()
+        engine = args.tts_engine or getattr(cfg.tts, "engine", "auto")
+        ok = check_tts_engine(engine)
+        print("TTS speak test:", "OK" if ok else "FAILED (see logs)")
         return
 
     check_required_dependencies(log)
 
     if args.single:
         args.continuous = False
-
-    cfg = config.get_config()
 
     tts_enabled = cfg.tts.enabled
     if args.tts:
@@ -280,9 +314,14 @@ def main(argv: list[str] | None = None) -> None:
         tts_enabled = False
     if args.tts and args.no_tts:
         log.warning("Both --tts and --no-tts given; --no-tts wins")
-    if tts_enabled and not HAS_TTS:
+    if tts_enabled and not HAS_TTS and args.tts_engine in (None, "auto", "pyttsx3"):
         log.warning("tts is enabled in config but pyttsx3 is not installed; install with: pip install pyttsx3")
-    tts_cfg = SimpleNamespace(enabled=tts_enabled, voice_id=cfg.tts.voice_id)
+    tts_cfg = SimpleNamespace(
+        enabled=tts_enabled,
+        voice_id=cfg.tts.voice_id,
+        engine=args.tts_engine or getattr(cfg.tts, "engine", "auto"),
+        fallback_enabled=getattr(cfg.tts, "fallback_enabled", True),
+    )
     wake_cfg = SimpleNamespace(
         enabled=cfg.wake.enabled and not args.no_wake,
         phrases=list(cfg.wake.phrases),
@@ -294,6 +333,16 @@ def main(argv: list[str] | None = None) -> None:
         timeout=cfg.voice.timeout_seconds,
         phrase_time_limit=cfg.voice.phrase_time_limit,
     )
+
+    if args.debug:
+        mic_info = listener.get_microphone_info()
+        if mic_info:
+            print(
+                f"Mic: index={mic_info['index']} sample_rate={mic_info['sample_rate']} "
+                f"name={mic_info['name']!r}"
+            )
+        else:
+            print("Mic info unavailable")
 
     state = {"armed": False, "armed_at": 0.0}
 

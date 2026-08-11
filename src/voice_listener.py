@@ -60,8 +60,14 @@ class VoiceListener:
                 source = sr.Microphone()
             with source as mic:
                 self.recognizer.adjust_for_ambient_noise(mic, duration=0.5)
+                logger.debug(
+                    "Audio energy: threshold=%s dynamic_threshold=%s",
+                    getattr(self.recognizer, "energy_threshold", None),
+                    getattr(self.recognizer, "dynamic_energy_threshold", None),
+                )
                 audio = self.recognizer.listen(mic, timeout=timeout, phrase_time_limit=phrase_time_limit)
             text = self.recognizer.recognize_google(audio)
+            logger.debug("Raw recognized text: %r", text)
             return text.strip().lower()
         except WaitTimeoutError:
             return None
@@ -73,6 +79,26 @@ class VoiceListener:
             return None
         except Exception as exc:
             logger.exception("Unexpected error during voice recognition: %s", exc)
+            return None
+
+    def get_microphone_info(self) -> dict | None:
+        """Return device index, sample rate, and name of the default microphone."""
+        try:
+            if sr is None:
+                return None
+            mic = sr.Microphone()
+            index = getattr(mic, "device_index", None)
+            sample_rate = getattr(mic, "sample_rate", None)
+            name = None
+            try:
+                names = sr.Microphone.list_microphone_names()
+                if index is not None and 0 <= index < len(names):
+                    name = names[index]
+            except Exception:
+                logger.debug("Could not list microphone names", exc_info=True)
+            return {"index": index, "sample_rate": sample_rate, "name": name}
+        except Exception as exc:
+            logger.warning("Could not query microphone info: %s", exc)
             return None
 
     def listen_loop(self, callback, timeout=None) -> None:

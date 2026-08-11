@@ -1,11 +1,20 @@
+import logging
 import re
 
 from config_loader import load_config
 
+logger = logging.getLogger(__name__)
+
 _STRIP_PUNCTUATION = re.compile(r"[^a-z0-9\s]")
+_EXTRA_SPACES = re.compile(r"\s+")
 
 _config = None
 _config_path = None
+
+
+def _normalize(text: str) -> str:
+    """Lower-case, strip punctuation, and collapse runs of whitespace."""
+    return _EXTRA_SPACES.sub(" ", _STRIP_PUNCTUATION.sub("", str(text).lower())).strip()
 
 
 def get_config(config_path=None, force_reload=False):
@@ -22,28 +31,40 @@ def get_config(config_path=None, force_reload=False):
     return _config
 
 
-def detect_wake_phrase(text: str, phrases: list[str]) -> str | None:
-    """Return the first wake phrase contained in text (case-insensitive), if any."""
-    if not text or not phrases:
-        return None
-    normalized = text.lower()
+def detect_wake_phrase(text: str, phrases: list[str]) -> tuple[str | None, str]:
+    """Detect a wake phrase in text and return (matched_phrase, remaining_text).
+
+    Normalizes both sides (lower-case, no punctuation, collapsed whitespace),
+    matches at word boundaries, and prefers the longest matching phrase.
+    Returns (None, text) if no wake phrase is found.
+    """
+    if not text:
+        return None, ""
+    normalized = _normalize(text)
+    if not normalized or not phrases:
+        return None, text
+
+    best_phrase = None
+    best_match = None
     for phrase in phrases:
         if not phrase:
             continue
-        if phrase.lower() in normalized:
-            return phrase
-    return None
+        candidate = _normalize(phrase)
+        if not candidate:
+            continue
+        match = re.search(r"\b" + re.escape(candidate) + r"\b", normalized)
+        if match and (best_match is None or len(candidate) > len(_normalize(best_phrase))):
+            best_phrase = phrase
+            best_match = match
 
+    if best_phrase is None or best_match is None:
+        logger.debug("No wake phrase found in: %r", text)
+        return None, text
 
-def strip_phrase(text: str, phrase: str) -> str:
-    """Remove the first occurrence of phrase from text and trim whitespace."""
-    if not text or not phrase:
-        return text.strip() if text else ""
-    idx = text.lower().find(phrase.lower())
-    if idx == -1:
-        return text.strip()
-    remainder = text[:idx] + text[idx + len(phrase):]
-    return remainder.strip()
+    remainder = (normalized[: best_match.start()] + normalized[best_match.end():])
+    remainder = _EXTRA_SPACES.sub(" ", remainder).strip()
+    logger.info("Wake phrase detected: %r; remaining command: %r", best_phrase, remainder)
+    return best_phrase, remainder
 
 
 def match_command(text: str) -> str | None:

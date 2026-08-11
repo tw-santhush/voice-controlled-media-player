@@ -33,7 +33,9 @@
   },
   "tts": {
     "enabled": true,
-    "voice_id": null
+    "voice_id": null,
+    "engine": "auto",
+    "fallback_enabled": true
   },
   "wake": {
     "enabled": true,

@@ -66,7 +66,9 @@ python src/main.py --player auto --continuous
 | `--config`     | Path to a custom JSON config file (default: `config.json`).     |
 | `--tts`        | Force-enable text-to-speech feedback (overrides config).        |
 | `--no-tts`     | Force-disable text-to-speech feedback (overrides config).       |
+| `--tts-engine` | TTS backend: `auto` (default), `pyttsx3`, `powershell`, `say`, `espeak`, or `system`. |
 | `--no-wake`    | Disable the wake-word requirement (overrides config).           |
+| `--debug`      | Enable debug logging (raw recognized text, mic details, audio levels). |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -77,7 +79,8 @@ Before running, diagnose your environment:
 python src/main.py --check-deps
 ```
 
-It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, and `python-vlc` are available.
+It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, and `python-vlc` are available,
+and tests the TTS setup (it speaks a short test phrase if TTS works).
 
 ## Configuration
 
@@ -135,7 +138,9 @@ Control it via the `tts` config section:
 ```json
 "tts": {
     "enabled": true,
-    "voice_id": null
+    "voice_id": null,
+    "engine": "auto",
+    "fallback_enabled": true
 }
 ```
 
@@ -143,8 +148,14 @@ Control it via the `tts` config section:
 - `voice_id`: optional voice identifier (e.g. Windows SAPI token such as
   `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_EN-US_ZIRA_11.0`,
   or `com.apple.voice.compact.en-US` on macOS). Leave `null` for the default voice.
+- `engine`: `auto` tries `pyttsx3` first, then falls back to an OS tool. Or pick one explicitly:
+  `pyttsx3`, `powershell` (Windows SAPI), `say` (macOS), `espeak` (Linux, with `spd-say` as a secondary),
+  or `system` (best tool for the current OS). `pyttsx3` never falls back.
+- `fallback_enabled`: when `true` and `pyttsx3` is unavailable, the OS-level fallback (`powershell`, `say`,
+  or `espeak` depending on platform) is used automatically. Set `false` to disable the fallback entirely.
 
-Override on the command line: `--tts` forces it on, `--no-tts` forces it off.
+Override on the command line: `--tts` forces it on, `--no-tts` forces it off, and `--tts-engine`
+selects the backend for this run.
 
 ## Wake Word
 
@@ -160,7 +171,8 @@ conversation. Configure it under `wake`:
 ```
 
 - `enabled`: set to `false` to process every utterance as a command.
-- `phrases`: phrases (case-insensitive) that arm the app for a command.
+- `phrases`: phrases (case-insensitive) that arm the app for a command. Detection uses word boundaries and
+  ignores punctuation around the phrase ("hey player - play" works), and the longest matching phrase wins.
 - `timeout_seconds`: if you say just the wake phrase, the app waits this long for the follow-up command.
 
 Examples:
@@ -194,3 +206,6 @@ Enable/disable TTS exactly as above or in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.
 - **Nothing heard / no audio device** → Check that your microphone is the default input device and not muted.
+- **`Could not understand the audio`** → The microphone picked up speech but recognition failed. Raise the
+  `voice.timeout_seconds` value, move closer to the mic, reduce background noise, and run with `--debug` to see the
+  raw recognized text and audio energy levels — this shows whether your speech was even received.
