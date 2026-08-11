@@ -42,6 +42,15 @@ DEFAULT_CONFIG = {
             "fullscreen": "f",
         },
     },
+    "tts": {
+        "enabled": True,
+        "voice_id": None,
+    },
+    "wake": {
+        "enabled": True,
+        "phrases": ["hey player", "hello player", "player"],
+        "timeout_seconds": 3,
+    },
     "commands": {
         "play": ["play", "resume", "continue"],
         "pause": ["pause", "hold", "stop playing"],

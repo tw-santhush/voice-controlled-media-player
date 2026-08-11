@@ -22,6 +22,30 @@ def get_config(config_path=None, force_reload=False):
     return _config
 
 
+def detect_wake_phrase(text: str, phrases: list[str]) -> str | None:
+    """Return the first wake phrase contained in text (case-insensitive), if any."""
+    if not text or not phrases:
+        return None
+    normalized = text.lower()
+    for phrase in phrases:
+        if not phrase:
+            continue
+        if phrase.lower() in normalized:
+            return phrase
+    return None
+
+
+def strip_phrase(text: str, phrase: str) -> str:
+    """Remove the first occurrence of phrase from text and trim whitespace."""
+    if not text or not phrase:
+        return text.strip() if text else ""
+    idx = text.lower().find(phrase.lower())
+    if idx == -1:
+        return text.strip()
+    remainder = text[:idx] + text[idx + len(phrase):]
+    return remainder.strip()
+
+
 def match_command(text: str) -> str | None:
     if not text:
         return None

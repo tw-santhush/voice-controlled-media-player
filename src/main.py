@@ -1,6 +1,8 @@
 import argparse
 import logging
 import sys
+import time
+from types import SimpleNamespace
 
 try:
     import keyboard  # noqa: F401
@@ -27,6 +29,12 @@ except ImportError:
     HAS_REQUESTS = False
 
 try:
+    import pyttsx3  # noqa: F401
+    HAS_TTS = True
+except ImportError:
+    HAS_TTS = False
+
+try:
     import vlc  # noqa: F401
     HAS_PYTHON_VLC = True
 except (ImportError, OSError):
@@ -34,6 +42,7 @@ except (ImportError, OSError):
 
 import config
 import player_control
+import tts
 from voice_listener import VoiceListener
 
 LOG_FILE = "app.log"
@@ -44,6 +53,19 @@ ACTIVATE_HINT = (
     "  source .venv/bin/activate  (Linux/macOS)\n"
     "Then install dependencies with: pip install -r requirements.txt"
 )
+
+TTS_PHRASES = {
+    "play": "Playing",
+    "pause": "Paused",
+    "stop": "Stopped",
+    "skip_forward": "Skipped forward",
+    "skip_backward": "Skipped backward",
+    "volume_up": "Volume up",
+    "volume_down": "Volume down",
+    "mute": "Muted",
+    "fullscreen": "Fullscreen",
+    "exit": "Exiting",
+}
 
 
 def setup_logging() -> logging.Logger:
@@ -68,6 +90,7 @@ def dependency_report() -> list[str]:
         ("pyaudio", HAS_PYAUDIO, "install the PyAudio wheel matching your Python version (see README)"),
         ("requests", HAS_REQUESTS, "pip install requests"),
         ("keyboard", HAS_KEYBOARD, "pip install keyboard  (optional: HTTP control works without it)"),
+        ("pyttsx3", HAS_TTS, "pip install pyttsx3  (optional: text-to-speech feedback)"),
         ("python-vlc", HAS_PYTHON_VLC, "pip install python-vlc  (optional)"),
     ]
     lines = ["Dependency status:"]
@@ -114,15 +137,18 @@ def build_controller(player: str) -> player_control.PlayerController:
     return player_control.AutoController()
 
 
-def run_once(listener: VoiceListener, controller, log: logging.Logger) -> None:
-    text = listener.listen_once()
-    if not text:
-        log.info("Nothing heard")
+def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False) -> None:
+    if not tts_cfg.enabled:
         return
-    handle_command(listener, controller, text, log)
+    if failed:
+        tts.speak("Command failed")
+        return
+    phrase = TTS_PHRASES.get(action) if action else None
+    if phrase:
+        tts.speak(phrase, voice_id=tts_cfg.voice_id)
 
 
-def handle_command(listener, controller, text: str, log: logging.Logger) -> None:
+def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg) -> None:
     action = config.match_command(text)
     if not action:
         log.info("No matching command for: %r", text)
@@ -130,9 +156,60 @@ def handle_command(listener, controller, text: str, log: logging.Logger) -> None
     log.info("Recognized command: %r -> %s", text, action)
     if action == "exit":
         log.info("Exit requested")
+        speak_feedback(tts_cfg, action)
         listener.stop()
         return
-    getattr(controller, action)()
+    try:
+        getattr(controller, action)()
+    except Exception:
+        log.exception("Command %s failed", action)
+        speak_feedback(tts_cfg, failed=True)
+        return
+    speak_feedback(tts_cfg, action)
+
+
+def process_recognized(listener, controller, text: str, log: logging.Logger, tts_cfg, wake_cfg, state) -> None:
+    """Handle a recognized utterance, applying wake-word filtering if enabled."""
+    if not text:
+        return
+
+    if wake_cfg.enabled:
+        now = time.time()
+        if state["armed"]:
+            if now - state["armed_at"] > wake_cfg.timeout_seconds:
+                state["armed"] = False
+                log.info("Wake command timeout; listening for a wake phrase again")
+            else:
+                state["armed"] = False
+                handle_command(listener, controller, text, log, tts_cfg)
+                return
+
+        phrase = config.detect_wake_phrase(text, wake_cfg.phrases)
+        if not phrase:
+            log.info("Ignored speech without wake phrase: %r", text)
+            return
+        log.info("Wake phrase detected: %r", phrase)
+        remainder = config.strip_phrase(text, phrase)
+        if not remainder:
+            state["armed"] = True
+            state["armed_at"] = now
+            log.info(
+                "Wake phrase only; listening for a command (within %.1fs)...",
+                wake_cfg.timeout_seconds,
+            )
+            return
+        handle_command(listener, controller, remainder, log, tts_cfg)
+        return
+
+    handle_command(listener, controller, text, log, tts_cfg)
+
+
+def run_once(listener: VoiceListener, controller, log: logging.Logger, tts_cfg, wake_cfg, state) -> None:
+    text = listener.listen_once()
+    if not text:
+        log.info("Nothing heard")
+        return
+    process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -165,6 +242,21 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Path to a custom JSON config file (default: config.json in the project root)",
     )
+    parser.add_argument(
+        "--tts",
+        action="store_true",
+        help="Force-enable text-to-speech feedback (overrides config)",
+    )
+    parser.add_argument(
+        "--no-tts",
+        action="store_true",
+        help="Force-disable text-to-speech feedback (overrides config)",
+    )
+    parser.add_argument(
+        "--no-wake",
+        action="store_true",
+        help="Disable the wake-word requirement (overrides config)",
+    )
     args = parser.parse_args(argv)
 
     if args.config:
@@ -180,22 +272,43 @@ def main(argv: list[str] | None = None) -> None:
         args.continuous = False
 
     cfg = config.get_config()
+
+    tts_enabled = cfg.tts.enabled
+    if args.tts:
+        tts_enabled = True
+    if args.no_tts:
+        tts_enabled = False
+    if args.tts and args.no_tts:
+        log.warning("Both --tts and --no-tts given; --no-tts wins")
+    if tts_enabled and not HAS_TTS:
+        log.warning("tts is enabled in config but pyttsx3 is not installed; install with: pip install pyttsx3")
+    tts_cfg = SimpleNamespace(enabled=tts_enabled, voice_id=cfg.tts.voice_id)
+    wake_cfg = SimpleNamespace(
+        enabled=cfg.wake.enabled and not args.no_wake,
+        phrases=list(cfg.wake.phrases),
+        timeout_seconds=cfg.wake.timeout_seconds,
+    )
+
     controller = build_controller(args.player)
     listener = VoiceListener(
         timeout=cfg.voice.timeout_seconds,
         phrase_time_limit=cfg.voice.phrase_time_limit,
     )
 
+    state = {"armed": False, "armed_at": 0.0}
+
     log.info("Starting voice-controlled media player (player=%s)", args.player)
     print(f"Listening... player={args.player}. Press Ctrl+C to stop.")
 
     try:
         if args.continuous:
-            listener.listen_loop(lambda text: handle_command(listener, controller, text, log))
+            listener.listen_loop(
+                lambda text: process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
+            )
             while listener.running:
                 listener.wait_stop(timeout=1)
         else:
-            run_once(listener, controller, log)
+            run_once(listener, controller, log, tts_cfg, wake_cfg, state)
     except KeyboardInterrupt:
         log.info("Shutdown requested (Ctrl+C)")
     finally:

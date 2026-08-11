@@ -64,6 +64,9 @@ python src/main.py --player auto --continuous
 | `--continuous` | Run continuously, listening for voice commands (default: `True`). |
 | `--single`     | Listen for a single command and exit (useful for testing).      |
 | `--config`     | Path to a custom JSON config file (default: `config.json`).     |
+| `--tts`        | Force-enable text-to-speech feedback (overrides config).        |
+| `--no-tts`     | Force-disable text-to-speech feedback (overrides config).       |
+| `--no-wake`    | Disable the wake-word requirement (overrides config).           |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -97,6 +100,8 @@ To customize:
    | `player`           | Default skip seconds and volume step                                     |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
    | `commands`         | Spoken phrases → action mappings for voice commands                      |
+   | `tts`              | Text-to-speech feedback: `enabled` toggles it, `voice_id` selects a voice (null = default) |
+   | `wake`             | Wake-word support: `enabled`, `phrases` (e.g. "hey player"), and `timeout_seconds` |
 
 3. Run the app; it reads `config.json` on startup.
 
@@ -116,6 +121,60 @@ VLC: Tools → Preferences → Show all settings → Interface → Main interfac
 
 MPC-HC: View → Options → Player → Web Interface → tick "Listen on port" (default 13579).
 
+## Text-to-Speech (TTS) Feedback
+
+After executing a command the app speaks it aloud (e.g. "Playing", "Paused"). TTS is optional and uses the
+offline `pyttsx3` library — install it with:
+
+```bash
+pip install pyttsx3
+```
+
+Control it via the `tts` config section:
+
+```json
+"tts": {
+    "enabled": true,
+    "voice_id": null
+}
+```
+
+- `enabled`: set to `false` to disable spoken feedback.
+- `voice_id`: optional voice identifier (e.g. Windows SAPI token such as
+  `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_EN-US_ZIRA_11.0`,
+  or `com.apple.voice.compact.en-US` on macOS). Leave `null` for the default voice.
+
+Override on the command line: `--tts` forces it on, `--no-tts` forces it off.
+
+## Wake Word
+
+By default the app only acts on commands spoken after a wake phrase, so it won't trigger on normal
+conversation. Configure it under `wake`:
+
+```json
+"wake": {
+    "enabled": true,
+    "phrases": ["hey player", "hello player", "player"],
+    "timeout_seconds": 3
+}
+```
+
+- `enabled`: set to `false` to process every utterance as a command.
+- `phrases`: phrases (case-insensitive) that arm the app for a command.
+- `timeout_seconds`: if you say just the wake phrase, the app waits this long for the follow-up command.
+
+Examples:
+
+```bash
+# Wake required (default) — "hey player play" works, bare "play" is ignored
+python src/main.py --player vlc --single
+
+# Disable the wake requirement for this run
+python src/main.py --player vlc --single --no-wake
+```
+
+Enable/disable TTS exactly as above or in `config.json`.
+
 ## Project Structure
 
 ```
@@ -131,7 +190,7 @@ MPC-HC: View → Options → Player → Web Interface → tick "Listen on port" 
 
 - **`ModuleNotFoundError: No module named 'keyboard'`** → Reactivate the virtual environment (`.venv\Scripts\activate`) and run `pip install -r requirements.txt`, or install it globally. `keyboard` is optional; HTTP control still works without it.
 - **`pyaudio not found`** → Install the wheel that matches your Python version (e.g. `PyAudio‑0.2.14‑cp311‑cp311‑win_amd64.whl` for Python 3.11 on 64-bit Windows), or use `pipwin install pyaudio`.
-- **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `src/config.py`.
+- **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.
 - **Nothing heard / no audio device** → Check that your microphone is the default input device and not muted.

@@ -14,3 +14,6 @@ keyboard
 
 # Optional native VLC bindings (not required for HTTP control)
 python-vlc
+
+# Optional: offline text-to-speech feedback (speaks commands aloud)
+pyttsx3
