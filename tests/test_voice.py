@@ -19,8 +19,10 @@ import config
 import main
 import requests
 import speech_recognition as sr
+import tray
 import tts
 import voice_listener
+import wake
 from player_control import AutoController, MPCController, PlayerController, VLCController
 from voice_listener import VoiceListener
 
@@ -1174,6 +1176,334 @@ class TestMainFeedback(unittest.TestCase):
         actions = vars(config.get_config().commands)
         missing = [action for action in actions if action not in main.TTS_PHRASES]
         self.assertEqual(missing, [])
+
+
+class TestNoiseGateAndConfidence(unittest.TestCase):
+    def _listener(self, recognizer=None, **kwargs):
+        cfg = SimpleNamespace(
+            voice=SimpleNamespace(
+                timeout_seconds=5,
+                phrase_time_limit=3,
+                energy_threshold=300,
+                dynamic_energy_threshold=False,
+                noise_gate_enabled=False,
+                noise_gate_threshold=10.0,
+                confidence_threshold=0.5,
+            )
+        )
+        with patch("voice_listener.config.get_config", return_value=cfg):
+            return VoiceListener(
+                recognizer=recognizer or FakeRecognizer("volume up"),
+                source=FakeMicSource(),
+                energy_threshold=300,
+                dynamic_energy_threshold=False,
+                **kwargs,
+            )
+
+    def test_noise_gate_enabled_blocks_quiet_audio(self):
+        listener = self._listener(noise_gate_enabled=True, noise_gate_threshold=20.0)
+        self.assertIsNone(listener.listen_once())
+
+    def test_noise_gate_enabled_passes_loud_audio(self):
+        class LoudRecognizer(FakeRecognizer):
+            def listen(self, source, timeout=None, phrase_time_limit=None):
+                audio = FakeAudio()
+                audio.get_raw_data = lambda: b"\xff\x7f" * 1600
+                return audio
+
+        listener = self._listener(
+            recognizer=LoudRecognizer("volume up"),
+            noise_gate_enabled=True,
+            noise_gate_threshold=20.0,
+        )
+        self.assertEqual(listener.listen_once(), "volume up")
+
+    def test_noise_gate_disabled_by_default(self):
+        listener = self._listener()
+        self.assertEqual(listener.listen_once(), "volume up")
+
+    def test_low_confidence_transcript_rejected(self):
+        class LowConfidence(FakeRecognizer):
+            def recognize_google(self, audio, show_all=False):
+                return {
+                    "alternative": [{"transcript": "volume up", "confidence": 0.1}],
+                    "final": True,
+                }
+
+        listener = self._listener(recognizer=LowConfidence("volume up"))
+        self.assertIsNone(listener.listen_once())
+
+    def test_high_confidence_transcript_accepted(self):
+        class HighConfidence(FakeRecognizer):
+            def recognize_google(self, audio, show_all=False):
+                return {
+                    "alternative": [{"transcript": "volume up", "confidence": 0.95}],
+                    "final": True,
+                }
+
+        listener = self._listener(recognizer=HighConfidence("volume up"))
+        self.assertEqual(listener.listen_once(), "volume up")
+
+    def test_no_confidence_short_text_heuristic_rejected(self):
+        listener = self._listener(recognizer=FakeRecognizer("ok"))
+        self.assertIsNone(listener.listen_once())
+
+    def test_no_confidence_normal_text_heuristic_accepted(self):
+        listener = self._listener(recognizer=FakeRecognizer("pause"))
+        self.assertEqual(listener.listen_once(), "pause")
+
+    def test_threshold_zero_disables_filtering(self):
+        listener = self._listener(
+            recognizer=FakeRecognizer("ok"),
+            confidence_threshold=0,
+        )
+        self.assertEqual(listener.listen_once(), "ok")
+
+
+class TestPorcupineWake(unittest.TestCase):
+    def test_porcupine_unavailable_without_package(self):
+        with patch.dict(sys.modules, {"pvporcupine": None}):
+            wake_word = wake.PorcupineWakeWord(access_key="abc", log=FAKE_LOG)
+        self.assertFalse(wake_word.available)
+        self.assertIsNone(wake_word.wait_for_wake_word(timeout=1))
+
+    def test_porcupine_unavailable_without_access_key(self):
+        fake_pv = types.ModuleType("pvporcupine")
+        fake_pv.create = MagicMock()
+        with patch.dict(sys.modules, {"pvporcupine": fake_pv}):
+            with patch("wake._env_access_key", return_value=None):
+                wake_word = wake.PorcupineWakeWord(keywords=["porcupine"], log=FAKE_LOG)
+        self.assertFalse(wake_word.available)
+        self.assertIsNone(wake_word.wait_for_wake_word())
+
+    def test_porcupine_available_labels_keyword(self):
+        class FakePorcupine:
+            sample_rate = 16000
+            frame_length = 512
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def process(self, frame):
+                return 0 if frame[0] == 2 else -1
+
+        fake_pv = types.ModuleType("pvporcupine")
+        fake_pv.create = MagicMock(return_value=FakePorcupine())
+        with patch.dict(sys.modules, {"pvporcupine": fake_pv}):
+            wake_word = wake.PorcupineWakeWord(
+                access_key="abc",
+                keywords=["porcupine", "hey google"],
+                log=FAKE_LOG,
+            )
+        self.assertTrue(wake_word.available)
+        self.assertEqual(wake_word.process([2] + [0] * 511), "porcupine")
+        self.assertEqual(wake_word.process([0] * 512), None)
+
+    def test_wait_for_wake_word_reads_frames(self):
+        class FakePorcupine:
+            sample_rate = 16000
+            frame_length = 512
+
+            def process(self, frame):
+                return 0
+
+        class FakePortaudio:
+            paInt16 = 8
+
+            def PyAudio(self):
+                return self
+
+            def open(self, **kwargs):
+                return self
+
+            def read(self, frame_count, exception_on_overflow=False):
+                return b"\x01\x00" * frame_count
+
+            def stop_stream(self):
+                pass
+
+            def close(self):
+                pass
+
+            def terminate(self):
+                pass
+
+        fake_pv = types.ModuleType("pvporcupine")
+        fake_pv.create = MagicMock(return_value=FakePorcupine())
+        fake_pa = FakePortaudio()
+        with patch.dict(sys.modules, {"pvporcupine": fake_pv, "pyaudio": fake_pa}):
+            wake_word = wake.PorcupineWakeWord(
+                access_key="abc",
+                keywords=["porcupine"],
+                sample_rate=16000,
+                frame_length=512,
+                log=FAKE_LOG,
+            )
+        self.assertTrue(wake_word.available)
+        self.assertEqual(wake_word.wait_for_wake_word(timeout=2), "porcupine")
+
+    def test_build_porcupine_creates_instance(self):
+        with patch("wake.PorcupineWakeWord") as mock_cls:
+            mock_cls.return_value = "instance"
+            cfg = SimpleNamespace(
+                wake=SimpleNamespace(
+                    porcupine_access_key="key",
+                    porcupine_keywords=["porcupine"],
+                    porcupine_keyword_paths=[],
+                )
+            )
+            result = wake.build_porcupine(cfg, log=FAKE_LOG, enabled=True)
+        self.assertEqual(result, "instance")
+        mock_cls.assert_called_once()
+        self.assertEqual(mock_cls.call_args.kwargs["access_key"], "key")
+
+
+class TestPushToTalkGate(unittest.TestCase):
+    def _tts_cfg(self, enabled=True):
+        return SimpleNamespace(enabled=enabled, voice_id=None, engine="auto", fallback_enabled=True, cooldown_seconds=1.5)
+
+    def _ptt(self, enabled=True, key="ctrl"):
+        return SimpleNamespace(enabled=enabled, key=key)
+
+    def test_gate_allows_when_ptt_disabled(self):
+        state = {"tts_cooldown_until": 0.0}
+        gate = main._listen_gate(state, self._tts_cfg(False), self._ptt(False), FAKE_LOG)
+        self.assertTrue(gate())
+
+    def test_gate_blocks_when_key_not_held(self):
+        state = {"tts_cooldown_until": 0.0}
+        fake_kb = types.ModuleType("keyboard")
+        fake_kb.is_pressed = MagicMock(return_value=False)
+        with patch.object(main, "HAS_KEYBOARD", True):
+            with patch.object(main, "keyboard", fake_kb):
+                gate = main._listen_gate(state, self._tts_cfg(False), self._ptt(True), FAKE_LOG)
+                self.assertFalse(gate())
+
+    def test_gate_allows_when_key_held(self):
+        state = {"tts_cooldown_until": 0.0}
+        fake_kb = types.ModuleType("keyboard")
+        fake_kb.is_pressed = MagicMock(return_value=True)
+        with patch.object(main, "HAS_KEYBOARD", True):
+            with patch.object(main, "keyboard", fake_kb):
+                gate = main._listen_gate(state, self._tts_cfg(False), self._ptt(True), FAKE_LOG)
+                self.assertTrue(gate())
+
+    def test_gate_blocks_during_tts_cooldown(self):
+        state = {"tts_cooldown_until": time.time() + 10}
+        gate = main._listen_gate(state, self._tts_cfg(True), self._ptt(False), FAKE_LOG)
+        self.assertFalse(gate())
+
+    def test_gate_allows_after_tts_cooldown(self):
+        state = {"tts_cooldown_until": time.time() - 10}
+        gate = main._listen_gate(state, self._tts_cfg(True), self._ptt(False), FAKE_LOG)
+        self.assertTrue(gate())
+
+
+class TestTTSAction(unittest.TestCase):
+    def test_tts_cooldown_set_after_successful_command(self):
+        controller = _FakeCommandController()
+        state = {"listening": True, "tts_cooldown_until": 0.0}
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True, cooldown_seconds=2.0)
+        with patch("main.tts.speak"):
+            main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, state)
+        self.assertGreater(state["tts_cooldown_until"], time.time())
+        self.assertEqual(controller.calls, ["play"])
+
+    def test_no_cooldown_when_tts_disabled(self):
+        controller = _FakeCommandController()
+        state = {"listening": True, "tts_cooldown_until": 0.0}
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True, cooldown_seconds=2.0)
+        main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, state)
+        self.assertEqual(state["tts_cooldown_until"], 0.0)
+
+
+class TestWakeEngineConfig(unittest.TestCase):
+    def _args(self, **overrides):
+        base = dict(single=False, no_wake=False, wake_debug=False, mic_index=None)
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_porcupine_engine_selected_when_available(self):
+        porcupine = SimpleNamespace(available=True, error=None)
+        fake_wake = SimpleNamespace(wake=SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3, engine="auto"))
+        with patch("main.build_porcupine", return_value=porcupine) as mock_build:
+            cfg = main.build_wake_cfg(self._args(), fake_wake, FAKE_LOG)
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.engine, "porcupine")
+        self.assertIs(cfg.porcupine, porcupine)
+        mock_build.assert_called_once()
+
+    def test_string_engine_fallback_when_unavailable(self):
+        porcupine = SimpleNamespace(available=False, error="no key")
+        fake_wake = SimpleNamespace(wake=SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3, engine="auto"))
+        with patch("main.build_porcupine", return_value=porcupine):
+            cfg = main.build_wake_cfg(self._args(), fake_wake, FAKE_LOG)
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.engine, "string")
+        self.assertIsNone(cfg.porcupine)
+
+    def test_porcupine_engine_forced_and_missing_logs_warning(self):
+        porcupine = SimpleNamespace(available=False, error="no access key")
+        fake_wake = SimpleNamespace(wake=SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3, engine="porcupine"))
+        log = logging.getLogger("test.wake.cfg")
+        with patch("main.build_porcupine", return_value=porcupine):
+            cfg = main.build_wake_cfg(self._args(), fake_wake, log)
+        self.assertEqual(cfg.engine, "string")
+
+    def test_wake_disabled_never_uses_porcupine(self):
+        fake_wake = SimpleNamespace(wake=SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3, engine="porcupine"))
+        cfg = main.build_wake_cfg(self._args(no_wake=True), fake_wake, FAKE_LOG)
+        self.assertFalse(cfg.enabled)
+        self.assertIsNone(cfg.porcupine)
+
+
+class TestAlwaysActiveListenCommands(unittest.TestCase):
+    def _setup(self):
+        controller = _FakeCommandController()
+        wake_cfg = SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3)
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        state = {"listening": True, "armed": False, "armed_at": 0.0}
+        return _FakeStopListener(), controller, tts_cfg, wake_cfg, state
+
+    def test_listen_off_works_without_wake_word(self):
+        listener, controller, tts_cfg, wake_cfg, state = self._setup()
+        main.process_recognized(listener, controller, "stop listening", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertFalse(state["listening"])
+
+    def test_listen_off_works_while_paused(self):
+        listener, controller, tts_cfg, wake_cfg, state = self._setup()
+        state["listening"] = False
+        main.process_recognized(listener, controller, "turn off", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertFalse(state["listening"])
+
+    def test_listen_on_works_while_paused_without_wake(self):
+        listener, controller, tts_cfg, wake_cfg, state = self._setup()
+        state["listening"] = False
+        main.process_recognized(listener, controller, "listen", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertTrue(state["listening"])
+
+    def test_new_phrase_forms_map_to_toggles(self):
+        self.assertEqual(config.match_command("resume"), "listen_on")
+        self.assertEqual(config.match_command("turn on"), "listen_on")
+        self.assertEqual(config.match_command("enable"), "listen_on")
+        self.assertEqual(config.match_command("disable"), "listen_off")
+        self.assertEqual(config.match_command("go silent"), "listen_off")
+
+
+class TestTrayIconStates(unittest.TestCase):
+    def test_green_when_listening(self):
+        self.assertEqual(tray._current_color({"listening": True}), tray.GREEN)
+
+    def test_red_when_paused(self):
+        self.assertEqual(tray._current_color({"listening": False}), tray.RED)
+
+    def test_yellow_during_tts_cooldown(self):
+        state = {"listening": True, "tts_cooldown_until": time.time() + 5}
+        self.assertEqual(tray._current_color(state), tray.YELLOW)
+
+    def test_green_after_cooldown_expires(self):
+        state = {"listening": True, "tts_cooldown_until": time.time() - 5}
+        self.assertEqual(tray._current_color(state), tray.GREEN)
 
 
 if __name__ == "__main__":

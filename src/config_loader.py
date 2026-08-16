@@ -26,6 +26,9 @@ DEFAULT_CONFIG = {
         "phrase_time_limit": 3,
         "energy_threshold": 300,
         "dynamic_energy_threshold": True,
+        "noise_gate_enabled": False,
+        "noise_gate_threshold": 10.0,
+        "confidence_threshold": 0.5,
     },
     "recognizer": {
         "engine": "auto",
@@ -34,6 +37,10 @@ DEFAULT_CONFIG = {
     "player": {
         "default_skip_seconds": 10,
         "volume_step": 5,
+    },
+    "push_to_talk": {
+        "enabled": False,
+        "key": "ctrl",
     },
     "keyboard_fallback": {
         "enabled": True,
@@ -53,14 +60,19 @@ DEFAULT_CONFIG = {
         "voice_id": None,
         "engine": "auto",
         "fallback_enabled": True,
+        "cooldown_seconds": 1.5,
     },
     "wake": {
         "enabled": True,
+        "engine": "auto",
         "phrases": ["hey player", "hello player", "player", "hey"],
+        "porcupine_keywords": ["porcupine", "hey google", "alexa"],
+        "porcupine_keyword_paths": [],
+        "porcupine_access_key": None,
         "timeout_seconds": 3,
     },
     "commands": {
-        "play": ["play", "resume", "continue", "start", "play movie", "play video"],
+        "play": ["play", "continue", "start", "play movie", "play video"],
         "pause": ["pause", "hold", "stop playing", "freeze", "pause movie", "pause video"],
         "stop": ["stop", "quit", "end", "stop movie", "exit playback", "stop video"],
         "skip_forward": [
@@ -127,15 +139,18 @@ DEFAULT_CONFIG = {
             "go to previous",
         ],
         "listen_on": [
-            "start listening",
             "listen",
-            "turn on listening",
-            "resume listening",
+            "start listening",
+            "resume",
+            "turn on",
+            "enable",
         ],
         "listen_off": [
             "stop listening",
             "pause listening",
-            "turn off listening",
+            "turn off",
+            "disable",
+            "go silent",
         ],
         "volume_set": [],
     },

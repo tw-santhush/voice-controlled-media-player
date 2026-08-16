@@ -8,10 +8,13 @@ None and the caller falls back to terminal mode.
 import logging
 import subprocess
 import sys
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
 GREEN = (76, 175, 80)
+YELLOW = (255, 193, 7)
 RED = (229, 57, 53)
 WHITE = (255, 255, 255)
 ICON_SIZE = 64
@@ -76,6 +79,14 @@ def _show_popup(text: str) -> None:
             logger.debug("Failed to show status popup", exc_info=True)
 
 
+def _current_color(state) -> tuple[int, int, int]:
+    """Pick the icon color: green listening, yellow during a TTS cooldown, red paused."""
+    until = state.get("tts_cooldown_until", 0.0)
+    if until and time.time() < until:
+        return YELLOW
+    return GREEN if state.get("listening", True) else RED
+
+
 def create_tray_icon(listener, controller, state=None, verbose: bool = False):
     """Create a pystray icon controlling the app, or None if unavailable.
 
@@ -103,7 +114,24 @@ def create_tray_icon(listener, controller, state=None, verbose: bool = False):
     icon = pystray.Icon("voice-controlled-media-player")
 
     def _refresh_image() -> None:
-        icon.icon = _draw_mic(GREEN if listening() else RED)
+        icon.icon = _draw_mic(_current_color(state))
+
+    def _auto_refresh() -> None:
+        """Periodically re-draw the icon so the yellow cooldown state updates."""
+        last = None
+        while getattr(icon, "visible", True):
+            color = _current_color(state)
+            if color != last:
+                last = color
+                try:
+                    _refresh_image()
+                except Exception:
+                    logger.debug("Tray icon refresh failed", exc_info=True)
+                    break
+            time.sleep(0.25)
+
+    refresh_thread = threading.Thread(target=_auto_refresh, name="tray-refresh", daemon=True)
+    refresh_thread.start()
 
     def _toggle_listening(icon_item=None, item=None) -> None:
         state["listening"] = not listening()

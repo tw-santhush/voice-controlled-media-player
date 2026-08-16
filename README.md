@@ -69,7 +69,9 @@ python src/main.py --player auto --continuous
 | `--tts-engine` | TTS backend: `auto` (default), `pyttsx3`, `powershell`, `say`, `espeak`, or `system`. |
 | `--no-wake`    | Disable the wake-word requirement (overrides config).           |
 | `--wake-debug` | Print the raw recognized text and whether a wake phrase was detected. |
-| `--debug`      | Enable debug logging (raw recognized text, mic details, audio levels). |
+| `--push-to-talk` | Enable push-to-talk: commands are only processed while the PTT key is held (overrides config). |
+| `--ptt-key`    | Key to hold for push-to-talk (default: config value, usually `ctrl`). |
+| `--debug`      | Enable debug logging (raw recognized text, mic details, audio levels, noise-gate rejections). |
 | `--recognizer` | Speech recognizer: `google` (online), `vosk` (offline), or `auto` (default: config or auto). |
 | `--mic-index`  | Microphone device index to use (list them with `--list-mics`).  |
 | `--list-mics`  | List all available microphones (via pyaudio) and exit.          |
@@ -110,7 +112,8 @@ Then launch it in tray mode:
 python src/main.py --tray
 ```
 
-- A microphone icon appears in the tray: **green** while it is actively listening, **red** while paused.
+- A microphone icon appears in the tray: **green** while it is actively listening, **yellow** while the TTS
+  response is still being spoken (the cooldown window), and **red** while paused.
   Listening starts **on** by default — you do not have to enable it after starting the app.
 - Right-click for the menu:
   - **Start Listening/Stop Listening** — toggle voice recognition without closing the app (same as the
@@ -199,13 +202,14 @@ To customize:
    | ------------------ | ----------------------------------------------------------------------- |
    | `vlc`              | VLC host, HTTP port, password, and whether VLC control is enabled        |
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
-   | `voice`            | Listening timeout, phrase time limit (seconds), and the `energy_threshold` used to detect speech start |
+   | `voice`            | Listening timeout, phrase time limit (seconds), `energy_threshold`, plus the **noise gate** and **confidence threshold** (see below) |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
    | `player`           | Default skip seconds and volume step                                     |
+   | `push_to_talk`     | Push-to-talk: `enabled` and the `key` to hold                             |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
    | `commands`         | Spoken phrases → action mappings for voice commands (see Voice Commands) |
-   | `tts`              | Text-to-speech feedback: `enabled` toggles it, `voice_id` selects a voice (null = default) |
-   | `wake`             | Wake-word support: `enabled`, `phrases` (e.g. "hey player"), and `timeout_seconds` |
+   | `tts`              | Text-to-speech feedback: `enabled` toggles it, `voice_id` selects a voice (null = default), `cooldown_seconds` sets the post-speech silence window |
+   | `wake`             | Wake-word support: `enabled`, `engine` (`auto`/`porcupine`/`string`), `phrases` (e.g. "hey player"), Porcupine keywords, and `timeout_seconds` |
 
 3. Run the app; it reads `config.json` on startup.
 
@@ -254,6 +258,8 @@ Control it via the `tts` config section:
   or `system` (best tool for the current OS). `pyttsx3` never falls back.
 - `fallback_enabled`: when `true` and `pyttsx3` is unavailable, the OS-level fallback (`powershell`, `say`,
   or `espeak` depending on platform) is used automatically. Set `false` to disable the fallback entirely.
+- `cooldown_seconds`: how long (in seconds) after the assistant speaks that incoming audio is ignored, so the
+  app doesn't re-hear its own TTS response (default `1.5`). The tray icon shows **yellow** during this window.
 
 Override on the command line: `--tts` forces it on, `--no-tts` forces it off, and `--tts-engine`
 selects the backend for this run.
@@ -266,17 +272,53 @@ conversation. Configure it under `wake`:
 ```json
 "wake": {
     "enabled": true,
+    "engine": "auto",
     "phrases": ["hey player", "hello player", "player", "hey"],
+    "porcupine_keywords": ["porcupine", "hey google", "alexa"],
+    "porcupine_keyword_paths": [],
+    "porcupine_access_key": null,
     "timeout_seconds": 3
 }
 ```
 
 - `enabled`: set to `false` to process every utterance as a command.
-- `phrases`: phrases (case-insensitive) that arm the app for a command. Detection strips punctuation and
-  extra spaces, then matches the phrase **anywhere** in the text (not just at the start) at word boundaries;
-  the longest matching phrase wins. The defaults include the short, easy-to-recognize variants `player`
-  and `hey` on their own.
-- `timeout_seconds`: if you say just the wake phrase, the app waits this long for the follow-up command.
+- `engine`: the wake engine. `auto` (default) uses **Porcupine** when it is available and configured, and falls
+  back to string phrase matching otherwise. `porcupine` forces the Porcupine engine (falls back with a warning if
+  it can't initialize). `string` always uses phrase matching.
+- `phrases`: strings matched against the recognized text (see below). Used by the string engine and as the
+  fallback.
+- `porcupine_keywords`: built-in Porcupine keywords to listen for (e.g. `porcupine`, `hey google`, `alexa`).
+- `porcupine_keyword_paths`: optional custom keyword files (`.ppn` from the Picovoice Console). When non-empty,
+  they replace `porcupine_keywords`.
+- `porcupine_access_key`: your free Picovoice **AccessKey**. Leave `null` (or omit) to read the
+  `PICOVOICE_ACCESS_KEY` environment variable instead.
+- `timeout_seconds`: if you say just the wake word, the app waits this long for the follow-up command.
+
+With the **string engine**, detection strips punctuation and extra spaces, then matches the phrase **anywhere**
+in the text (not just at the start) at word boundaries; the longest matching phrase wins. The defaults include the
+short, easy-to-recognize variants `player` and `hey` on their own.
+
+### Porcupine setup
+
+For a proper wake word that doesn't run full speech recognition on every utterance:
+
+1. Install the optional library:
+   ```bash
+   pip install pvporcupine
+   ```
+2. Get a free **AccessKey** from <https://console.picovoice.ai>.
+3. Either set it in `config.json` (`wake.porcupine_access_key`) or export the environment variable:
+   ```bash
+   # PowerShell
+   $env:PICOVOICE_ACCESS_KEY = "your-access-key"
+   ```
+4. For a quick test, use the built-in keywords (default `porcupine`, `hey google`, `alexa`). Say one of them
+   instead of your custom phrase. With `engine=auto` the app logs "Porcupine wake word active" when it connects.
+5. To use a custom "Hey Player" keyword, train it in the Picovoice Console, download the `.ppn` file, and point
+   `wake.porcupine_keyword_paths` at it.
+
+If `pvporcupine` is missing, has no AccessKey, or fails to initialize, the app logs a warning and falls back to
+the string engine automatically, so the app keeps working without Porcupine.
 
 To see exactly what the recognizer heard and whether it counted as a wake phrase, run with `--wake-debug`:
 
@@ -303,7 +345,7 @@ and the longest matching phrase wins ("stop playing" pauses, while "stop" alone 
 
 | Action          | Example phrases                                                                 |
 | --------------- | ------------------------------------------------------------------------------- |
-| `play`          | play, resume, continue, start, play movie, play video                            |
+| `play`          | play, continue, start, play movie, play video                                |
 | `pause`         | pause, hold, stop playing, freeze, pause movie, pause video                      |
 | `stop`          | stop, quit, end, stop movie, exit playback, stop video                           |
 | `skip_forward`  | skip forward, forward 10 seconds, jump forward, advance, fast forward            |
@@ -315,8 +357,8 @@ and the longest matching phrase wins ("stop playing" pauses, while "stop" alone 
 | `exit`          | exit, quit app, close, shutdown, terminate                                       |
 | `next`          | next, next track, next video, next episode, skip to next                         |
 | `previous`      | previous, previous track, go back a chapter, back chapter                        |
-| `listen_on`     | start listening, listen, turn on listening, resume listening                     |
-| `listen_off`    | stop listening, pause listening, turn off listening                              |
+| `listen_on`     | listen, start listening, resume, turn on, enable                                 |
+| `listen_off`    | stop listening, pause listening, turn off, disable, go silent                    |
 | `volume_set`    | (special — handled by numeric parsing, see below)                                |
 
 > Note: `silence` maps to `mute` (above), not to `listen_off` — the longest matching phrase wins, so the mute
@@ -433,7 +475,10 @@ Or set it permanently in the `voice` section of `config.json`:
     "timeout_seconds": 5,
     "phrase_time_limit": 3,
     "energy_threshold": 300,
-    "dynamic_energy_threshold": true
+    "dynamic_energy_threshold": true,
+    "noise_gate_enabled": true,
+    "noise_gate_threshold": 10.0,
+    "confidence_threshold": 0.5
 }
 ```
 
@@ -441,6 +486,15 @@ Or set it permanently in the `voice` section of `config.json`:
 - `dynamic_energy_threshold`: when `true` (default), the recognizer re-adjusts the threshold to the
   ambient noise on every listen, which works well in most environments. Set it to `false` to keep the
   exact `energy_threshold` value.
+- `noise_gate_enabled`: when `true` (default), audio blocks whose RMS level is below
+  `noise_gate_threshold` are treated as silence and skipped **before** any speech recognition runs.
+  This stops the app from wasting recognition attempts on keyboard clicks and faint room noise.
+- `noise_gate_threshold`: the RMS level (0-100 scale used by the microphone meters) below which an audio
+  block is considered noise. If your mic is unusually quiet, lower it; if the gate never opens, raise it.
+- `confidence_threshold`: `0` disables confidence filtering. Otherwise, recognitions whose confidence is
+  below this value are discarded as too uncertain (Google provides a confidence score; engines that don't,
+  like Vosk, fall back to a length heuristic — very short "recognitions" like a single stray word are
+  rejected). Raise it for stricter filtering, lower it if real commands are being discarded.
 
 ### Test text-to-speech
 
@@ -487,7 +541,8 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.
 - **Tray mode doesn't respond to voice** → Work through these steps in order:
-  1. Check the tray icon color: **green** means listening is on, **red** means it is paused. If it is red,
+  1. Check the tray icon color: **green** means listening is on, **yellow** means the TTS response is still
+     being spoken (wait a moment), **red** means it is paused. If it is red,
      right-click the tray menu and choose **Start Listening**, or press the global hotkey (`Ctrl+Shift+L` by default).
   2. Verify the listener is actually running with `--test-tray`: if the tray menu works there but not in
      `--tray`, the problem is the voice listener, not the tray.
@@ -512,7 +567,8 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
   the speakers.
 - **The app hears itself (TTS feedback loop)** → TTS feedback is spoken by your speakers and re-recorded by the
   mic. Put on a headset so the mic doesn't hear the speakers, lower TTS with `--no-tts`, or pause listening right
-  after issuing a command.
+  after issuing a command. The `tts.cooldown_seconds` setting already makes the app ignore audio for a short
+  window after it speaks, which helps with quicker responses.
 - **My voice isn't being recognized** → Work through these steps in order:
   1. Confirm the mic captures audio: `python src/main.py --record-test`. Play back `test_audio.wav` — if it is
      silent, the mic is muted, not the default input device, or too quiet.

@@ -14,7 +14,10 @@
     "timeout_seconds": 5,
     "phrase_time_limit": 3,
     "energy_threshold": 300,
-    "dynamic_energy_threshold": true
+    "dynamic_energy_threshold": true,
+    "noise_gate_enabled": false,
+    "noise_gate_threshold": 10.0,
+    "confidence_threshold": 0.5
   },
   "recognizer": {
     "engine": "auto",
@@ -23,6 +26,10 @@
   "player": {
     "default_skip_seconds": 10,
     "volume_step": 5
+  },
+  "push_to_talk": {
+    "enabled": false,
+    "key": "ctrl"
   },
   "keyboard_fallback": {
     "enabled": true,
@@ -41,15 +48,20 @@
     "enabled": true,
     "voice_id": null,
     "engine": "auto",
-    "fallback_enabled": true
+    "fallback_enabled": true,
+    "cooldown_seconds": 1.5
   },
   "wake": {
     "enabled": true,
+    "engine": "auto",
     "phrases": ["hey player", "hello player", "player", "hey"],
+    "porcupine_keywords": ["porcupine", "hey google", "alexa"],
+    "porcupine_keyword_paths": [],
+    "porcupine_access_key": null,
     "timeout_seconds": 3
   },
   "commands": {
-    "play": ["play", "resume", "continue", "start", "play movie", "play video"],
+    "play": ["play", "continue", "start", "play movie", "play video"],
     "pause": ["pause", "hold", "stop playing", "freeze", "pause movie", "pause video"],
     "stop": ["stop", "quit", "end", "stop movie", "exit playback", "stop video"],
     "skip_forward": ["skip forward", "forward 10 seconds", "jump forward", "next 10 seconds", "advance", "go forward", "skip ahead", "fast forward"],
@@ -61,8 +73,8 @@
     "exit": ["exit", "quit app", "close", "shutdown", "terminate", "exit application"],
     "next": ["next", "next chapter", "next track", "skip to next", "next video", "next episode", "forward chapter"],
     "previous": ["previous", "previous chapter", "previous track", "go back a chapter", "previous video", "back chapter", "go to previous"],
-    "listen_on": ["start listening", "listen", "turn on listening", "resume listening"],
-    "listen_off": ["stop listening", "pause listening", "turn off listening"],
+    "listen_on": ["listen", "start listening", "resume", "turn on", "enable"],
+    "listen_off": ["stop listening", "pause listening", "turn off", "disable", "go silent"],
     "volume_set": []
   }
 }

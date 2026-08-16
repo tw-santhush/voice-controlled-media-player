@@ -3,6 +3,7 @@ import logging
 import shutil
 import struct
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -166,6 +167,9 @@ class VoiceListener:
         device_index=None,
         energy_threshold=None,
         dynamic_energy_threshold=None,
+        noise_gate_enabled=None,
+        noise_gate_threshold=None,
+        confidence_threshold=None,
     ):
         if recognizer is None:
             _require_speech_recognition()
@@ -191,6 +195,21 @@ class VoiceListener:
             dynamic_energy_threshold
             if dynamic_energy_threshold is not None
             else getattr(cfg.voice, "dynamic_energy_threshold", True)
+        )
+        self.noise_gate_enabled = (
+            noise_gate_enabled
+            if noise_gate_enabled is not None
+            else getattr(cfg.voice, "noise_gate_enabled", False)
+        )
+        self.noise_gate_threshold = (
+            noise_gate_threshold
+            if noise_gate_threshold is not None
+            else getattr(cfg.voice, "noise_gate_threshold", 10.0)
+        )
+        self.confidence_threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else getattr(cfg.voice, "confidence_threshold", 0.5)
         )
         recognizer.energy_threshold = self.energy_threshold
         recognizer.dynamic_energy_threshold = self.dynamic_energy_threshold
@@ -225,9 +244,20 @@ class VoiceListener:
                 )
                 audio = self.recognizer.listen(mic, timeout=timeout, phrase_time_limit=phrase_time_limit)
             _log_audio_stats(audio, getattr(self.recognizer, "energy_threshold", None))
-            text = self._recognize(audio)
-            logger.debug("Raw recognized text: %r", text)
-            return text.strip().lower()
+            if self.noise_gate_enabled:
+                amplitude = _rms(audio.get_raw_data())
+                if amplitude < self.noise_gate_threshold:
+                    logger.info(
+                        "Noise gate: ignoring audio (rms=%.1f below threshold %.1f)",
+                        amplitude,
+                        self.noise_gate_threshold,
+                    )
+                    return None
+            text, confidence = self._recognize(audio)
+            logger.debug("Raw recognized text: %r (confidence=%s)", text, confidence)
+            if not self._passes_confidence(text, confidence):
+                return None
+            return (text or "").strip().lower()
         except WaitTimeoutError:
             return None
         except UnknownValueError:
@@ -273,21 +303,26 @@ class VoiceListener:
                 elapsed += chunk
         return energies
 
-    def _recognize(self, audio) -> str:
+    def _recognize(self, audio):
+        """Recognize audio, returning a (text, confidence) pair.
+
+        `confidence` is the recognizer's reported confidence (0..1) when
+        available, otherwise None.
+        """
         if self.recognizer_type in ("vosk", "auto"):
             try:
-                text = self._recognize_vosk(audio)
+                text, confidence = self._recognize_vosk(audio)
                 if text:
-                    return text
+                    return text, confidence
                 logger.warning("Vosk returned no text; falling back to Google")
             except LookupError as exc:
                 if self.recognizer_type == "vosk":
                     logger.warning("Vosk unavailable (%s); falling back to Google", exc)
                 else:
                     logger.debug("Vosk unavailable (%s); using Google", exc)
-        return self.recognizer.recognize_google(audio)
+        return self._recognize_google(audio)
 
-    def _recognize_vosk(self, audio) -> str:
+    def _recognize_vosk(self, audio):
         try:
             import vosk
         except ImportError as exc:
@@ -299,7 +334,58 @@ class VoiceListener:
         recognizer = vosk.KaldiRecognizer(self._model, sample_rate)
         recognizer.AcceptWaveform(audio.get_raw_data())
         result = json.loads(recognizer.FinalResult())
-        return (result.get("text") or "").strip().lower()
+        text = (result.get("text") or "").strip().lower()
+        confidence = result.get("confidence")
+        return text, confidence
+
+    def _recognize_google(self, audio):
+        recognizer = self.recognizer
+        if self.confidence_threshold:
+            try:
+                result = recognizer.recognize_google(audio, show_all=True)
+            except TypeError:
+                text = recognizer.recognize_google(audio)
+                return (text or "").strip().lower(), None
+            if isinstance(result, dict):
+                alternatives = result.get("alternative") or []
+                if not alternatives:
+                    return "", None
+                best = alternatives[0] or {}
+                return (
+                    (best.get("transcript") or "").strip().lower(),
+                    best.get("confidence"),
+                )
+            if isinstance(result, list) and result:
+                best = result[0] or {}
+                return (
+                    (best.get("transcript") or "").strip().lower(),
+                    best.get("confidence"),
+                )
+        text = recognizer.recognize_google(audio)
+        return (text or "").strip().lower(), None
+
+    def _passes_confidence(self, text, confidence):
+        """Return True if the recognized text should be acted upon.
+
+        When `confidence_threshold` is set and the recognizer reports a
+        confidence score, that score must meet the threshold. Recognizers that
+        do not report confidence fall back to a heuristic: very short
+        transcripts are treated as likely mis-heard noise. A threshold of 0
+        disables confidence filtering entirely.
+        """
+        threshold = self.confidence_threshold
+        if not threshold:
+            return True
+        if confidence is not None:
+            if confidence < threshold:
+                logger.info("Low confidence: %.2f below %.2f for %r", confidence, threshold, text)
+                return False
+            return True
+        text = (text or "").strip()
+        if len(text) < 3:
+            logger.info("Low confidence: transcript too short (%r)", text)
+            return False
+        return True
 
     def get_microphone_info(self) -> dict | None:
         """Return device index, sample rate, and name of the selected microphone."""

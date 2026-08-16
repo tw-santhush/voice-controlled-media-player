@@ -23,6 +23,11 @@ pyttsx3
 # unless the vosk_model_path config value points at an existing model.
 # vosk
 
+# Optional: offline wake-word engine (Porcupine by Picovoice). Needs a free
+# Picovoice access key (config wake.porcupine_access_key or env
+# PICOVOICE_ACCESS_KEY). Falls back to string-based wake words if missing.
+pvporcupine
+
 # Optional: system tray icon (--tray). Pillow is used to draw the icon.
 # If missing, the app falls back to running in the terminal.
 pystray
