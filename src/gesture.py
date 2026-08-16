@@ -116,13 +116,37 @@ def _camera_backends() -> list:
     return backends
 
 
+SIGNAL_DELTA = 2
+OPEN_WARMUP_TRIES = 15
+CAMERA_WARMUP_FRAMES = 20
+
+
+def _frame_has_signal(frame, delta: int = SIGNAL_DELTA) -> bool:
+    """True when a frame contains real image content.
+
+    Some drivers hand back constant-value (near-black) placeholder frames while
+    the camera is unavailable or warming up; those carry valid dimensions but
+    bare no signal, so ``read()`` succeeding says nothing about the image. A
+    real frame - even in a dark room - has pixel values to spread across at
+    least ``delta`` levels. Frames that do not expose min/max (test doubles,
+    unusual CV variants) are treated as having signal so the check stays
+    friction-free.
+    """
+    try:
+        return float(frame.max()) - float(frame.min()) > delta
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
 def open_camera(camera_id: int = 0):
     """Open a webcam that reliably delivers frames, or return None.
 
     Tries the requested index (then 0, 1, -1) with each platform backend
-    (DirectShow first on Windows) and reads a few warm-up frames to discard the
-    initial black frames most cameras emit. The returned capture is open and
-    producing frames.
+    (DirectShow first on Windows) and reads warm-up frames. Frames that are
+    valid-but-constant (black placeholders, no signal) do not count as
+    "working": the capture is only accepted once a frame with real content
+    arrives, otherwise the next backend/index is tried. The returned capture is
+    open and producing real frames.
     """
     if cv2 is None:
         return None
@@ -136,12 +160,12 @@ def open_camera(camera_id: int = 0):
                 if cap is not None:
                     cap.release()
                 continue
-            for _ in range(6):
+            for _ in range(OPEN_WARMUP_TRIES):
                 try:
                     ret, frame = cap.read()
                 except Exception:
                     ret = False
-                if ret and frame is not None and frame.size > 0:
+                if ret and frame is not None and frame.size > 0 and _frame_has_signal(frame):
                     logger.info("Camera %s opened (backend %s)", index, backend)
                     return cap
                 time.sleep(0.03)
@@ -402,6 +426,8 @@ class GestureController:
         self._detector = None
         self._read_failures = 0
         self.max_read_failures = 10
+        self.warm_up_frames = CAMERA_WARMUP_FRAMES
+        self._frames_read = 0
         self._setup()
 
     def _setup(self) -> None:
@@ -501,6 +527,7 @@ class GestureController:
         self._cap = cap
         self.available = True
         self.error = None
+        self._frames_read = 0
         logger.info("Camera %s opened", requested)
         return True
 
@@ -593,6 +620,20 @@ class GestureController:
                 self._read_failures = 0
             return None
         self._read_failures = 0
+        self._frames_read += 1
+
+        if not _frame_has_signal(frame) and self._frames_read > self.warm_up_frames:
+            logger.debug("Camera frame has no signal (constant value); treating as a read failure")
+            self._read_failures += 1
+            if self._read_failures >= self.max_read_failures:
+                logger.warning(
+                    "Camera has delivered %d signal-less frames; re-opening the camera", self._read_failures
+                )
+                if not self._open_camera():
+                    logger.error("Could not re-open the camera; stopping gesture detection")
+                    self._stop_event.set()
+                self._read_failures = 0
+            return None
 
         frame = cv2.flip(frame, 1)  # mirror like a selfie view
         try:
@@ -636,6 +677,11 @@ class GestureController:
         if not self.available:
             logger.error("Gesture detection unavailable: %s", self.error)
             return
+        if self.show_preview and cv2 is not None:
+            try:
+                cv2.namedWindow("Gesture Control", cv2.WINDOW_NORMAL)
+            except Exception:
+                pass
         self._stop_event.clear()
         while not self._stop_event.is_set():
             if self._paused:

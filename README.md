@@ -627,11 +627,13 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`opencv-python`/`mediapipe` not installed (gesture mode exits with an error)** → Install them: `pip install opencv-python mediapipe numpy`. Or fall back to voice with `--mode voice`. If you hit a `protobuf` conflict, install the exact versions from `requirements.txt`.
 - **MediaPipe 1.x errors about `solutions`** → MediaPipe 1.x removed the legacy `mp.solutions` API; this app automatically switches to the Tasks API. If you still see initialization errors, make sure the hand-landmarker model can be downloaded (the app caches it in `~/.cache/mediapipe/hand_landmarker.task`), or point `gesture.model_path` / `MEDIAPIPE_HAND_MODEL` at a pre-downloaded `hand_landmarker.task` file.
 - **`Could not open camera 0` / the preview window is black** → The app already retries several camera indexes
-  (`--camera` index, then `0`, `1`, `-1`) and every video backend, plus reads warm-up frames to skip the initial
-  black frames most webcams emit, so a "black preview" is usually the camera still warming up or genuinely dead.
-  Run `python src/main.py --raw-preview` to see the raw feed and diagnostics; press `q` to exit. If the raw preview
-  is black too, the webcam is busy (closed by another app) or index 0 isn't your webcam — try `--camera 1`,
-  `--camera 2`, etc., or in tray mode use the **Next Camera** menu item.
+  (`--camera` index, then `0`, `1`, `-1`) and every video backend, and it rejects cameras that only deliver
+  constant near-black frames (a "signal-less" feed some drivers emit while the webcam is busy or unavailable) -
+  the still-black remnant of such a camera reads as a frame but contains no image. Run
+  `python src/main.py --raw-preview` to see the raw feed and diagnostics (frame size plus mean/min/max/std, and a
+  warning when frames are constant/black); press `q` to exit. If the raw preview is black too, the webcam is busy
+  (closed by another app), privacy-blurred, or index 0 isn't your webcam — try `--camera 1`, `--camera 2`, etc.,
+  or in tray mode use the **Next Camera** menu item.
 - **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).

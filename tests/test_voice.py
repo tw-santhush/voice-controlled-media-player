@@ -1731,6 +1731,34 @@ class _Frame:
     size = 4800
     shape = (480, 640, 3)
 
+    def min(self):
+        return 10
+
+    def max(self):
+        return 250
+
+    def mean(self):
+        return 120.0
+
+    def std(self):
+        return 60.0
+
+
+class _ConstantFrame(_Frame):
+    """A valid-size frame with no image signal (max - min <= SIGNAL_DELTA)."""
+
+    def min(self):
+        return 2
+
+    def max(self):
+        return 2
+
+    def mean(self):
+        return 2.0
+
+    def std(self):
+        return 0.0
+
 
 class _FakeCap:
     """Reads a fixed list of (ok, frame) tuples; then fails forever."""
@@ -1786,7 +1814,7 @@ class TestGestureCameraOpen(unittest.TestCase):
         self.assertEqual(calls[0], (0, 700))
         self.assertEqual(len(calls), 2)
 
-    def test_open_camera_accepts_black_frames(self):
+    def test_open_camera_accepts_frames_with_signal(self):
         cap = _FakeCap([(True, _Frame()) for _ in range(3)])
         with patch.object(gesture, "cv2", _fake_cv2(lambda index, backend: cap)):
             result = gesture.open_camera(0)
@@ -1805,6 +1833,78 @@ class TestGestureCameraOpen(unittest.TestCase):
             result = gesture.open_camera(0)
         self.assertIsNone(result)
         self.assertTrue(all(c.released for c in caps))
+
+    def test_open_camera_skips_constant_frames_then_accepts_signal(self):
+        cap = _FakeCap([(True, _ConstantFrame()), (True, _ConstantFrame()), (True, _Frame())])
+        with patch.object(gesture, "cv2", _fake_cv2(lambda index, backend: cap)):
+            result = gesture.open_camera(0)
+        self.assertIs(result, cap)
+        self.assertEqual(cap.reads, 3)
+
+    def test_open_camera_rejects_camera_with_only_constant_frames(self):
+        caps = []
+
+        def factory(index, backend):
+            cap = _FakeCap([(True, _ConstantFrame())])
+            caps.append(cap)
+            return cap
+
+        with patch.object(gesture, "cv2", _fake_cv2(factory)):
+            result = gesture.open_camera(0)
+        self.assertIsNone(result)
+        self.assertTrue(all(c.released for c in caps))
+
+    def test_frame_has_signal_distinguishes_real_from_constant(self):
+        self.assertTrue(gesture._frame_has_signal(_Frame()))
+        self.assertFalse(gesture._frame_has_signal(_ConstantFrame()))
+
+    def test_controller_tolerates_constant_frames_during_warmup(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        constant = _FakeCap([(True, _ConstantFrame()) for _ in range(5)])
+        controller._cap = constant
+        detector = MagicMock()
+        detector.process.return_value = None
+        controller._detector = detector
+        controller.available = True
+        controller._frames_read = 0
+        with patch.object(gesture, "cv2", MagicMock()):
+            for _ in range(5):
+                self.assertIsNone(controller.detect_gesture())
+        self.assertIs(controller._cap, constant)
+        self.assertEqual(controller._read_failures, 0)
+
+    def test_controller_counts_constant_frames_as_failures_after_warmup(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        constant = _FakeCap([(True, _ConstantFrame())])
+        controller._cap = constant
+        detector = MagicMock()
+        detector.process.return_value = None
+        controller._detector = detector
+        controller.available = True
+        controller._frames_read = controller.warm_up_frames + 1
+        with patch.object(gesture, "cv2", MagicMock()):
+            self.assertIsNone(controller.detect_gesture())
+        self.assertEqual(controller._read_failures, 1)
+
+    def test_controller_reopens_on_constant_frames_after_warmup(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        constant = _FakeCap([(True, _ConstantFrame())])
+        controller._cap = constant
+        detector = MagicMock()
+        detector.process.return_value = None
+        controller._detector = detector
+        controller.available = True
+        controller._frames_read = controller.warm_up_frames + 1
+        good = _FakeCap([(True, _Frame())])
+        with patch.object(gesture, "cv2", MagicMock()), patch.object(gesture, "open_camera", return_value=good):
+            for _ in range(controller.max_read_failures):
+                self.assertIsNone(controller.detect_gesture())
+        self.assertIs(controller._cap, good)
+        self.assertEqual(controller._read_failures, 0)
+        self.assertTrue(controller.available)
 
     def test_controller_reopens_after_repeated_failures(self):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):

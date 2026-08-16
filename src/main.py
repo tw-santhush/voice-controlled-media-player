@@ -1065,11 +1065,23 @@ def run_raw_preview(camera_id: int | None = None) -> int:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     if width and height:
         print(f"Camera reports input size: {width}x{height}")
+    try:
+        mean, minv, maxv, std = frame.mean(), frame.min(), frame.max(), frame.std()
+        print(f"First frame stats: mean={float(mean):.1f} min={int(minv)} max={int(maxv)} std={float(std):.2f}")
+    except Exception:
+        pass
+    if not gesture_mod._frame_has_signal(frame):
+        print(
+            "WARNING: camera is delivering constant (signal-less) frames - the device is not producing a "
+            "real image. Check camera/privacy settings, or that another app hasn't locked the webcam.",
+            file=sys.stderr,
+        )
     if height and height <= 240:
         print(f"WARNING: camera reports a small {width}x{height} frame; the preview will be scaled up 1.5x.")
         height = int(height * 1.5)
     print("Press q to quit")
     window = "Raw Camera Preview (q to quit)"
+    warned_no_signal = False
     try:
         while True:
             try:
@@ -1078,6 +1090,9 @@ def run_raw_preview(camera_id: int | None = None) -> int:
                 ok = False
             if not ok or frame is None:
                 continue
+            if not gesture_mod._frame_has_signal(frame) and not warned_no_signal:
+                print("WARNING: frames keep coming back black/constant - the webcam is not sending a real image.", file=sys.stderr)
+                warned_no_signal = True
             if frame.shape[0] != height:
                 frame = cv2.resize(frame, (width, height))
             cv2.imshow(window, frame)
