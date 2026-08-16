@@ -149,7 +149,11 @@ class TestVolumeParsing(unittest.TestCase):
 
 class TestVoiceListener(unittest.TestCase):
     def test_listen_once_returns_recognized_text(self):
-        listener = VoiceListener(recognizer=FakeRecognizer("volume up"), source=FakeMicSource())
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("volume up"),
+            source=FakeMicSource(),
+            noise_gate_enabled=False,
+        )
         self.assertEqual(listener.listen_once(), "volume up")
 
     def test_listen_once_unknown_value_returns_none(self):
@@ -244,6 +248,7 @@ def _vosk_listener(text="hey player play", recognizer_type="vosk", **kwargs):
         source=FakeMicSource(),
         recognizer_type=recognizer_type,
         vosk_model_path="fake-model",
+        noise_gate_enabled=False,
         **kwargs,
     )
     patchers = [
@@ -257,7 +262,11 @@ def _vosk_listener(text="hey player play", recognizer_type="vosk", **kwargs):
 
 class TestRecognizerSelection(unittest.TestCase):
     def test_default_uses_google(self):
-        listener = VoiceListener(recognizer=FakeRecognizer("volume up"), source=FakeMicSource())
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("volume up"),
+            source=FakeMicSource(),
+            noise_gate_enabled=False,
+        )
         self.assertEqual(listener.recognizer_type, "google")
         self.assertEqual(listener.listen_once(), "volume up")
 
@@ -283,6 +292,7 @@ class TestRecognizerSelection(unittest.TestCase):
             source=FakeMicSource(),
             recognizer_type="vosk",
             vosk_model_path="fake-model",
+            noise_gate_enabled=False,
         )
         with patch.dict(sys.modules, {"vosk": None}):
             self.assertEqual(listener.listen_once(), "volume up")
@@ -293,6 +303,7 @@ class TestRecognizerSelection(unittest.TestCase):
             source=FakeMicSource(),
             recognizer_type="auto",
             vosk_model_path="fake-model",
+            noise_gate_enabled=False,
         )
         with patch.dict(sys.modules, {"vosk": _make_fake_vosk()}):
             with patch(

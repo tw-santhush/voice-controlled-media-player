@@ -245,7 +245,8 @@ Control it via the `tts` config section:
     "enabled": true,
     "voice_id": null,
     "engine": "auto",
-    "fallback_enabled": true
+    "fallback_enabled": true,
+    "cooldown_seconds": 1.5
 }
 ```
 
@@ -272,19 +273,19 @@ conversation. Configure it under `wake`:
 ```json
 "wake": {
     "enabled": true,
-    "engine": "auto",
+    "engine": "porcupine",
     "phrases": ["hey player", "hello player", "player", "hey"],
-    "porcupine_keywords": ["porcupine", "hey google", "alexa"],
+    "porcupine_keywords": ["porcupine", "hey google"],
     "porcupine_keyword_paths": [],
     "porcupine_access_key": null,
-    "timeout_seconds": 3
+    "timeout_seconds": 5
 }
 ```
 
 - `enabled`: set to `false` to process every utterance as a command.
-- `engine`: the wake engine. `auto` (default) uses **Porcupine** when it is available and configured, and falls
-  back to string phrase matching otherwise. `porcupine` forces the Porcupine engine (falls back with a warning if
-  it can't initialize). `string` always uses phrase matching.
+- `engine`: the wake engine. `porcupine` (default) uses **Porcupine**, falling back to string phrase matching
+  with a warning if it can't initialize. `auto` uses Porcupine when it is available and configured, and falls
+  back to string phrase matching otherwise. `string` always uses phrase matching.
 - `phrases`: strings matched against the recognized text (see below). Used by the string engine and as the
   fallback.
 - `porcupine_keywords`: built-in Porcupine keywords to listen for (e.g. `porcupine`, `hey google`, `alexa`).
@@ -453,7 +454,8 @@ stays near `0` while you speak, the mic is muted, not the default device, or too
 
 ### Tune the speech-detection threshold (`--energy-test`)
 
-SpeechRecognition uses `recognizer.energy_threshold` to decide when speech starts (default `300`).
+SpeechRecognition uses `recognizer.energy_threshold` to decide when speech starts (default `20` in
+this app's config).
 If it is too high, your voice is ignored; too low and background noise triggers false commands.
 
 ```bash
@@ -474,18 +476,19 @@ Or set it permanently in the `voice` section of `config.json`:
 "voice": {
     "timeout_seconds": 5,
     "phrase_time_limit": 3,
-    "energy_threshold": 300,
-    "dynamic_energy_threshold": true,
+    "energy_threshold": 20,
+    "dynamic_energy_threshold": false,
     "noise_gate_enabled": true,
     "noise_gate_threshold": 10.0,
     "confidence_threshold": 0.5
 }
 ```
 
-- `energy_threshold`: the energy level above which a sound is treated as the start of speech.
-- `dynamic_energy_threshold`: when `true` (default), the recognizer re-adjusts the threshold to the
-  ambient noise on every listen, which works well in most environments. Set it to `false` to keep the
-  exact `energy_threshold` value.
+- `energy_threshold`: the energy level above which a sound is treated as the start of speech (default `20`, tuned
+  for a quiet room with the noise gate on; see `--energy-test`).
+- `dynamic_energy_threshold`: when `true`, the recognizer re-adjusts the threshold to the
+  ambient noise on every listen. Defaults to `false`, so the exact `energy_threshold` value is kept and the
+  noise gate does the quiet-sound filtering. Set to `true` to let SpeechRecognition auto-tune instead.
 - `noise_gate_enabled`: when `true` (default), audio blocks whose RMS level is below
   `noise_gate_threshold` are treated as silence and skipped **before** any speech recognition runs.
   This stops the app from wasting recognition attempts on keyboard clicks and faint room noise.

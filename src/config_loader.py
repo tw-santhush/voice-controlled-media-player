@@ -24,9 +24,9 @@ DEFAULT_CONFIG = {
     "voice": {
         "timeout_seconds": 5,
         "phrase_time_limit": 3,
-        "energy_threshold": 300,
-        "dynamic_energy_threshold": True,
-        "noise_gate_enabled": False,
+        "energy_threshold": 20,
+        "dynamic_energy_threshold": False,
+        "noise_gate_enabled": True,
         "noise_gate_threshold": 10.0,
         "confidence_threshold": 0.5,
     },
@@ -64,12 +64,12 @@ DEFAULT_CONFIG = {
     },
     "wake": {
         "enabled": True,
-        "engine": "auto",
+        "engine": "porcupine",
         "phrases": ["hey player", "hello player", "player", "hey"],
-        "porcupine_keywords": ["porcupine", "hey google", "alexa"],
+        "porcupine_keywords": ["porcupine", "hey google"],
         "porcupine_keyword_paths": [],
         "porcupine_access_key": None,
-        "timeout_seconds": 3,
+        "timeout_seconds": 5,
     },
     "commands": {
         "play": ["play", "continue", "start", "play movie", "play video"],

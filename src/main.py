@@ -658,7 +658,7 @@ def run_energy_test(listener: VoiceListener, duration: float = 5.0, interval: fl
     suggested = max(round(median * 1.5), 30)
     print()
     print(f"Median ambient energy: {median:.1f}")
-    print(f"Suggested energy_threshold: {suggested}  (SpeechRecognition default is 300).")
+    print(f"Suggested energy_threshold: {suggested}  (config default is 20).")
     print(f"Apply it with: python src/main.py --set-energy {suggested}")
     if suggested > 300:
         print("Your environment is noisy; a higher threshold reduces false triggers.")

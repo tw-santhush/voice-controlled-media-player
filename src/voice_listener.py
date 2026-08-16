@@ -189,7 +189,7 @@ class VoiceListener:
         self.energy_threshold = (
             energy_threshold
             if energy_threshold is not None
-            else getattr(cfg.voice, "energy_threshold", 300)
+            else getattr(cfg.voice, "energy_threshold", 20)
         )
         self.dynamic_energy_threshold = (
             dynamic_energy_threshold
