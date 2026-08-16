@@ -27,7 +27,10 @@
     "camera_id": 0,
     "debounce_frames": 3,
     "cooldown_seconds": 0.5,
-    "swipe_threshold": 0.12,
+    "swipe_threshold": 50,
+    "pinch_threshold": 0.05,
+    "volume_interval_seconds": 0.5,
+    "volume_step": 5,
     "model_path": null
   },
   "player": {

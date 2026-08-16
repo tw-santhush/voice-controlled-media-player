@@ -223,26 +223,76 @@ def count_extended_fingers(landmarks) -> list[bool]:
     return [thumb, index, middle, ring, pinky]
 
 
-def classify_hand(landmarks) -> str | None:
-    """Classify a hand shape into an action string, or None if unrecognized."""
+def classify_hand(landmarks, pinch_threshold: float = 0.05) -> str | None:
+    """Classify a hand shape into an action string, or None if unrecognized.
+
+    Gesture mapping:
+    - index finger only -> ``play_pause`` (toggle)
+    - thumb only (pointing up/down) -> ``volume_up`` / ``volume_down`` (continuous)
+    - index + thumb pinched close together -> ``toggle_fullscreen``
+    - thumb + index close within ``pinch_threshold`` normalized units counts as a pinch
+    - fist -> ``stop`` (legacy)
+    - peace sign -> ``toggle_mute`` (legacy)
+
+    A fully-open hand returns None: the open-hand swipes are handled by
+    ``SwipeTracker`` so a stationary open palm deliberately fires nothing.
+    """
     ext = count_extended_fingers(landmarks)
-    count = sum(ext)
-    if count == 5:
-        return "play_pause"          # Open hand -> play/pause toggle
-    if count == 0:
-        return "stop"                # Closed fist -> stop
+    if not any(ext):
+        return "stop"                        # Closed fist -> stop
+    if ext[0] and ext[1] and not ext[2] and not ext[3] and not ext[4]:
+        tip = landmarks[_THUMB_TIP]
+        index = landmarks[_INDEX_TIP]
+        d_pinch = math.hypot(tip.x - index.x, tip.y - index.y)
+        if d_pinch < pinch_threshold:
+            return "toggle_fullscreen"       # Pinch -> fullscreen toggle
+    if ext[1] and not ext[0] and not ext[2] and not ext[3] and not ext[4]:
+        return "play_pause"                  # Index finger only -> play/pause toggle
     if ext[0] and not any(ext[1:]):
         wrist_y = landmarks[_WRIST].y
         if landmarks[_THUMB_TIP].y < wrist_y:
-            return "volume_up"       # Thumbs up -> volume up (+5)
+            return "volume_up"               # Thumbs up -> volume up (continuous)
         if landmarks[_THUMB_TIP].y > wrist_y:
-            return "volume_down"     # Thumbs down -> volume down (-5)
+            return "volume_down"             # Thumbs down -> volume down (continuous)
         return None
     if ext[1] and ext[2] and not ext[3] and not ext[4]:
-        return "toggle_mute"         # Peace sign -> mute/unmute
-    if ext[1] and not ext[2] and not ext[3] and not ext[4]:
-        return "toggle_fullscreen"   # Index pointing up -> fullscreen
+        return "toggle_mute"                 # Peace sign -> mute/unmute
     return None
+
+
+def draw_volume_bar(frame, percent, show_label: bool = True) -> None:
+    """Draw a horizontal volume bar across the bottom of ``frame``.
+
+    ``percent`` is clamped to 0-100. The bar is a filled rectangle with a
+    percentage label; it is drawn in place on the given frame.
+    """
+    if cv2 is None or frame is None or percent is None:
+        return
+    percent = max(0, min(100, int(round(float(percent)))))
+    h, w = frame.shape[:2]
+    bar_h = 14
+    y = h - bar_h - 8
+    margin = 12
+    x0, x1 = margin, w - margin
+    full = x1 - x0
+    cv2.rectangle(frame, (x0, y), (x1, y + bar_h), (50, 50, 50), -1)
+    fill = int(round(full * percent / 100.0))
+    if fill > 0:
+        color = (0, 200, 90) if percent >= 50 else (0, 130, 220)
+        cv2.rectangle(frame, (x0, y), (x0 + fill, y + bar_h), color, -1)
+    cv2.rectangle(frame, (x0, y), (x1, y + bar_h), (220, 220, 220), 1)
+    if show_label:
+        label = f"Volume: {percent}%"
+        cv2.putText(
+            frame,
+            label,
+            (x0, y - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
 
 def _download_hand_model(path: Path) -> None:
@@ -433,15 +483,28 @@ class GestureController:
         cooldown_seconds: float = 0.5,
         model_path: str | os.PathLike | None = None,
         swipe_threshold: float | None = None,
+        pinch_threshold: float = 0.05,
+        volume_interval_seconds: float = 0.5,
+        volume_step: int = 5,
+        volume_provider=None,
     ):
         self.camera_id = camera_id
         self.show_preview = show_preview
         self.debounce_frames = max(1, debounce_frames)
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self.model_path = model_path
+        self.pinch_threshold = max(0.005, pinch_threshold)
+        self.volume_interval_seconds = max(0.1, volume_interval_seconds)
+        self.volume_step = max(1, int(volume_step))
         self.available = False
         self.error = None
         self.last_action = None
+        self.volume_percent = 100
+        self.volume_provider = volume_provider
+        self._volume_hold_action = None
+        self._volume_next_at = 0.0
+        self._volume_cache = None
+        self._volume_cache_at = 0.0
         self._stop_event = threading.Event()
         self._thread = None
         self._paused = False
@@ -597,7 +660,37 @@ class GestureController:
             return
         self._annotate_frame(frame, landmarks, action)
         if self.show_preview and cv2 is not None:
+            draw_volume_bar(frame, self._current_volume())
             cv2.imshow("Gesture Control", frame)
+
+    def _current_volume(self) -> int:
+        """Return the volume to display (0-100), refreshing from the provider.
+
+        The provider (see ``volume_provider``) is polled at most every 0.5s so a
+        slow HTTP status read can't stall the preview loop. Without a provider a
+        local counter tracked on each volume change is used.
+        """
+        now = time.time()
+        if self.volume_provider is not None:
+            if self._volume_cache is None or now - self._volume_cache_at >= 0.5:
+                try:
+                    value = self.volume_provider()
+                    if value is not None:
+                        self.volume_percent = max(0, min(100, int(round(float(value)))))
+                except Exception:
+                    logger.debug("Volume provider failed; using tracked volume %d", self.volume_percent)
+                self._volume_cache_at = now
+                self._volume_cache = self.volume_percent
+            return self._volume_cache
+        return self.volume_percent
+
+    def _track_volume(self, action) -> None:
+        """Keep the local volume estimate in sync when a volume action fires."""
+        if action == "volume_up":
+            self.volume_percent = max(0, min(100, self.volume_percent + self.volume_step))
+        elif action == "volume_down":
+            self.volume_percent = max(0, min(100, self.volume_percent - self.volume_step))
+        self._volume_cache = None
 
     def get_preview_frame(self):
         """Return one annotated frame for display, or None when unavailable.
@@ -628,8 +721,10 @@ class GestureController:
             if swipe:
                 action = swipe
             elif not self._swipes.ignore_static(now):
-                action = classify_hand(landmarks)
+                action = classify_hand(landmarks, pinch_threshold=self.pinch_threshold)
         self._annotate_frame(frame, landmarks, action)
+        if self.show_preview:
+            draw_volume_bar(frame, self._current_volume())
         return frame
 
     def detect_gesture(self) -> str | None:
@@ -681,25 +776,47 @@ class GestureController:
         if landmarks is None:
             self._swipes.reset()
             self._debouncer.reset()
+            self._volume_hold_action = None
+            self._volume_next_at = 0.0
             self._draw_preview(frame, None, None)
             return None
 
         palm = landmarks[_PALM]
         swipe = self._swipes.feed(now, palm.x, palm.y)
         if swipe:
+            self._volume_hold_action = None
+            self._volume_next_at = 0.0
             self._draw_preview(frame, landmarks, swipe)
             action = self._debouncer.feed(swipe)
             if action:
                 self.last_action = action
+                logger.info("Detected swipe: %s", action)
             return action
 
         action = None
         if not self._swipes.ignore_static(now):
-            action = classify_hand(landmarks)
+            action = classify_hand(landmarks, pinch_threshold=self.pinch_threshold)
         self._draw_preview(frame, landmarks, action)
+
+        if action in ("volume_up", "volume_down"):
+            self._debouncer.reset()
+            if self._volume_hold_action != action:
+                self._volume_hold_action = action
+                self._volume_next_at = 0.0
+            if now < self._volume_next_at:
+                return None
+            self._volume_next_at = now + self.volume_interval_seconds
+            logger.info("Detected gesture: %s (continuous)", action)
+            self._track_volume(action)
+            self.last_action = action
+            return action
+
+        self._volume_hold_action = None
+        self._volume_next_at = 0.0
         action = self._debouncer.feed(action)
         if action:
             self.last_action = action
+            logger.info("Detected gesture: %s", action)
         return action
 
     def run_loop(self, callback) -> None:

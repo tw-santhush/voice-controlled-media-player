@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 
 try:
@@ -122,6 +124,14 @@ class PlayerController:
 
     def set_volume(self, percent: int) -> None:
         raise NotImplementedError
+
+    def get_volume(self) -> int | None:
+        """Return the current volume as a 0-100 percentage, or None if unknown.
+
+        Implementations must not raise: an unavailable player returns None so
+        the preview can quietly fall back to its locally tracked value.
+        """
+        return None
 
     def toggle_mute(self):
         raise NotImplementedError
@@ -278,6 +288,16 @@ class VLCController(PlayerController):
             return
         self._report(f"set_volume ({percent})")
 
+    def get_volume(self) -> int | None:
+        """Return the current VLC volume clamped to 0-100, or None on failure."""
+        self._check_enabled()
+        try:
+            volume, _ = self._status()
+        except (requests.RequestException, ValueError, ET.ParseError):
+            logger.debug("[vlc] get_volume failed")
+            return None
+        return max(0, min(100, int(round(volume))))
+
     def next(self):
         if not self._check_enabled():
             return
@@ -363,6 +383,7 @@ class MPCController(PlayerController):
         self.command_url = base_url.rstrip("/") + "/command.html"
         super().__init__(skip_seconds=skip_seconds, volume_step=volume_step)
         self.session = requests.Session()
+        self._last_volume = None
 
     def _check_enabled(self) -> bool:
         if not self.enabled:
@@ -376,6 +397,30 @@ class MPCController(PlayerController):
             self.command_url, params={"wm_command": command_id}, timeout=2
         )
         response.raise_for_status()
+
+    def _volume_html(self) -> str | None:
+        """Fetch the volume page and return the '<volume>' raw value, or None."""
+        try:
+            response = self.session.get(self.command_url, timeout=2)
+            response.raise_for_status()
+        except requests.RequestException:
+            return None
+        match = re.search(r"<volume>(-?\d+)</volume>", response.text)
+        if not match:
+            return None
+        return match.group(1)
+
+    def get_volume(self) -> int | None:
+        """Return the current MPC-HC volume (0-100), or the last known value."""
+        raw = self._volume_html()
+        if raw is None:
+            return self._last_volume
+        try:
+            percent = max(0, min(100, int(raw)))
+        except ValueError:
+            return self._last_volume
+        self._last_volume = percent
+        return percent
 
     def _send(self, command: str):
         if not self._check_enabled():
@@ -507,6 +552,15 @@ class AutoController:
 
     def set_volume(self, percent: int) -> None:
         self._route("set_volume", percent)
+
+    def get_volume(self) -> int | None:
+        controller = self.current if self.current is not None else self.resolve()
+        if controller is None:
+            return None
+        try:
+            return controller.get_volume()
+        except Exception:
+            return None
 
     def next(self):
         self._route("next")

@@ -1431,6 +1431,12 @@ def main(argv: list[str] | None = None) -> None:
             cooldown_seconds=getattr(gesture_cfg, "cooldown_seconds", 0.5) if gesture_cfg else 0.5,
             model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
             swipe_threshold=getattr(gesture_cfg, "swipe_threshold", None) if gesture_cfg else None,
+            pinch_threshold=getattr(gesture_cfg, "pinch_threshold", 0.05) if gesture_cfg else 0.05,
+            volume_interval_seconds=(
+                getattr(gesture_cfg, "volume_interval_seconds", 0.5) if gesture_cfg else 0.5
+            ),
+            volume_step=getattr(gesture_cfg, "volume_step", 5) if gesture_cfg else 5,
+            volume_provider=controller.get_volume if controller is not None else None,
         )
         if use_gesture
         else None

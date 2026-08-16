@@ -123,16 +123,14 @@ The gesture-to-action mapping:
 
 | Gesture            | Action               | Notes                          |
 | ------------------ | -------------------- | ------------------------------ |
-| Open hand          | Play / Pause toggle  | Toggles between play and pause |
+| Index finger up    | Play / Pause toggle  | Toggles between play and pause |
 | Closed fist        | Stop                 |                                |
-| Swipe left         | Skip backward        |                                |
-| Swipe right        | Skip forward         |                                |
-| Thumbs up          | Volume up (+5)       |                                |
-| Thumbs down        | Volume down (-5)     |                                |
-| Swipe up           | Volume up (+10)      |                                |
-| Swipe down         | Volume down (-10)    |                                |
+| Swipe left         | Skip backward        | Open hand swipe                |
+| Swipe right        | Skip forward         | Open hand swipe                |
+| Thumbs up          | Volume up (+5)       | Hold for continuous adjustment |
+| Thumbs down        | Volume down (-5)     | Hold for continuous adjustment |
 | Peace sign         | Mute / unmute        | Index + middle fingers         |
-| Index finger up    | Toggle fullscreen    |                                |
+| Pinch              | Toggle fullscreen    | Index + thumb pinch            |
 
 A gesture must be held for ~3 consecutive frames to fire, and commands are rate-limited (~0.5 s) so a quick
 motion can't double-trigger. Hold your hand up, make the shape, and move it back out of view between commands.
@@ -141,7 +139,7 @@ motion can't double-trigger. Hold your hand up, make the shape, and move it back
   **Next Camera** item when running in gesture tray mode. If the requested index (or backend) fails, the app
   automatically falls back to other camera indexes (`0`, then `1`, then `-1`) and to every available video backend
   (DirectShow first on Windows), so a busy or half-initialized webcam is rarely fatal.
-- `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit.
+- `--show-preview` opens a preview window showing your hand's landmarks, the detected gesture, and a live volume bar at the bottom; press `q` to quit.
 - `--raw-preview` skips gesture detection entirely and just shows the raw webcam feed with diagnostics. Use it first
   when the gesture preview is black or empty: it proves whether the camera itself produces frames. A camera that
   never starts or goes unreadable mid-run is automatically re-opened.
@@ -156,7 +154,10 @@ Gesture tuning lives under the `gesture` section in `config.json`:
     "camera_id": 0,
     "debounce_frames": 3,
     "cooldown_seconds": 0.5,
-    "swipe_threshold": 0.12,
+    "swipe_threshold": 50,
+    "pinch_threshold": 0.05,
+    "volume_interval_seconds": 0.5,
+    "volume_step": 5,
     "model_path": null
 }
 ```
@@ -164,7 +165,10 @@ Gesture tuning lives under the `gesture` section in `config.json`:
 - `camera_id`: default webcam index (the `--camera` flag overrides it).
 - `debounce_frames`: consecutive frames a gesture must be held before it fires (default `3`).
 - `cooldown_seconds`: minimum pause between commands in seconds (default `0.5`).
-- `swipe_threshold`: normalized (0-1) palm movement that counts as a swipe (default `0.12`).
+- `swipe_threshold`: distance palm movement that counts as a swipe (default `50`).
+- `pinch_threshold`: distance between thumb and index finger to count as a pinch (default `0.05`).
+- `volume_interval_seconds`: how often continuous volume adjustment triggers when holding thumbs up/down (default `0.5`).
+- `volume_step`: how much volume changes per step (default `5`).
 - `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 
 ### Health check

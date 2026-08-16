@@ -1613,8 +1613,8 @@ class TestGestureRecognition(unittest.TestCase):
         lm = _hand((False, True, True, False, False))
         self.assertEqual(gesture.count_extended_fingers(lm), [False, True, True, False, False])
 
-    def test_classify_open_hand_play_pause(self):
-        self.assertEqual(gesture.classify_hand(_hand((True, True, True, True, True))), "play_pause")
+    def test_classify_open_hand_none(self):
+        self.assertEqual(gesture.classify_hand(_hand((True, True, True, True, True))), None)
 
     def test_classify_fist_stop(self):
         self.assertEqual(gesture.classify_hand(_hand((False, False, False, False, False))), "stop")
@@ -1622,8 +1622,16 @@ class TestGestureRecognition(unittest.TestCase):
     def test_classify_peace_mute(self):
         self.assertEqual(gesture.classify_hand(_hand((False, True, True, False, False))), "toggle_mute")
 
-    def test_classify_index_only_fullscreen(self):
-        self.assertEqual(gesture.classify_hand(_hand((False, True, False, False, False))), "toggle_fullscreen")
+    def test_classify_index_only_play_pause(self):
+        self.assertEqual(gesture.classify_hand(_hand((False, True, False, False, False))), "play_pause")
+
+    def test_classify_pinch_fullscreen(self):
+        lm = _hand((True, True, False, False, False))
+        # For index to be extended, tip (lm[8]) y must be < pip (lm[6]) y. lm[6] is at 0.38.
+        # For thumb to be extended, distance tip to index_mcp > ip to index_mcp.
+        lm[8] = _Landmark(0.22, 0.35)
+        lm[4] = _Landmark(0.20, 0.35)
+        self.assertEqual(gesture.classify_hand(lm), "toggle_fullscreen")
 
     def test_classify_thumbs_up_volume_up(self):
         lm = _hand((True, False, False, False, False))
