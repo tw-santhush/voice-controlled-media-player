@@ -1858,6 +1858,24 @@ class TestGestureCameraOpen(unittest.TestCase):
         self.assertTrue(gesture._frame_has_signal(_Frame()))
         self.assertFalse(gesture._frame_has_signal(_ConstantFrame()))
 
+    def test_open_camera_error_points_at_silent_device(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        with patch.object(gesture, "cv2", _fake_cv2(lambda i, b: _FakeCap([(True, _ConstantFrame())]))):
+            opened = controller._open_camera(0)
+        self.assertFalse(opened)
+        self.assertFalse(controller.available)
+        self.assertIn("not sending frames", controller.error)
+
+    def test_open_camera_error_when_no_device(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        with patch.object(gesture, "cv2", _fake_cv2(lambda i, b: _FakeCap([], opened=False))):
+            opened = controller._open_camera(0)
+        self.assertFalse(opened)
+        self.assertNotIn("not sending frames", controller.error)
+        self.assertIn("Could not open camera", controller.error)
+
     def test_controller_tolerates_constant_frames_during_warmup(self):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
             controller = gesture.GestureController()

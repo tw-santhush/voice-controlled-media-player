@@ -138,6 +138,33 @@ def _frame_has_signal(frame, delta: int = SIGNAL_DELTA) -> bool:
         return True
 
 
+def _camera_present_but_silent(camera_id: int) -> bool:
+    """True when a device can be opened but none of its frames carry image data.
+
+    Distinguishes "no camera at all" from "camera present but not sending
+    frames" (in use by another app, privacy-blocked, shutter closed, or a
+    driver that refuses to stream) so the error message can point at the right
+    fix.
+    """
+    if cv2 is None:
+        return False
+    for index in _camera_candidates(camera_id):
+        for backend in _camera_backends():
+            try:
+                cap = cv2.VideoCapture(index, backend)
+            except Exception:
+                continue
+            opened = bool(cap is not None and cap.isOpened())
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if opened:
+                return True
+    return False
+
+
 def open_camera(camera_id: int = 0):
     """Open a webcam that reliably delivers frames, or return None.
 
@@ -521,7 +548,14 @@ class GestureController:
         cap = open_camera(requested)
         if cap is None:
             self.available = False
-            self.error = f"Could not open camera {requested} with any backend"
+            if _camera_present_but_silent(requested):
+                self.error = (
+                    f"Camera {requested} was found but is not sending frames. Another app may be using the "
+                    "webcam, Windows may be blocking camera access (Settings > Privacy > Camera), or the "
+                    "physical shutter/camera hotkey is closed. Close other apps and try again."
+                )
+            else:
+                self.error = f"Could not open camera {requested} with any backend"
             logger.error("%s", self.error)
             return False
         self._cap = cap
