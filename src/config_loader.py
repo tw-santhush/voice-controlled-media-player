@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
     },
     "wake": {
         "enabled": True,
-        "phrases": ["hey player", "hello player", "player"],
+        "phrases": ["hey player", "hello player", "player", "hey"],
         "timeout_seconds": 3,
     },
     "commands": {
@@ -125,6 +125,17 @@ DEFAULT_CONFIG = {
             "previous video",
             "back chapter",
             "go to previous",
+        ],
+        "listen_on": [
+            "start listening",
+            "listen",
+            "turn on listening",
+            "resume listening",
+        ],
+        "listen_off": [
+            "stop listening",
+            "pause listening",
+            "turn off listening",
         ],
         "volume_set": [],
     },

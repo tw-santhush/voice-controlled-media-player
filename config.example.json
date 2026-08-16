@@ -45,7 +45,7 @@
   },
   "wake": {
     "enabled": true,
-    "phrases": ["hey player", "hello player", "player"],
+    "phrases": ["hey player", "hello player", "player", "hey"],
     "timeout_seconds": 3
   },
   "commands": {
@@ -61,6 +61,8 @@
     "exit": ["exit", "quit app", "close", "shutdown", "terminate", "exit application"],
     "next": ["next", "next chapter", "next track", "skip to next", "next video", "next episode", "forward chapter"],
     "previous": ["previous", "previous chapter", "previous track", "go back a chapter", "previous video", "back chapter", "go to previous"],
+    "listen_on": ["start listening", "listen", "turn on listening", "resume listening"],
+    "listen_off": ["stop listening", "pause listening", "turn off listening"],
     "volume_set": []
   }
 }

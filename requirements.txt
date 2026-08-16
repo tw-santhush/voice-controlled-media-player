@@ -22,3 +22,8 @@ pyttsx3
 # Also downloads a small English model on first use (~50 MB) into ~/.cache/vosk
 # unless the vosk_model_path config value points at an existing model.
 # vosk
+
+# Optional: system tray icon (--tray). Pillow is used to draw the icon.
+# If missing, the app falls back to running in the terminal.
+pystray
+Pillow

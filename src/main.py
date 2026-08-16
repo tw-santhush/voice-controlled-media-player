@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,12 @@ try:
 except (ImportError, OSError):
     HAS_VOSK = False
 
+try:
+    import tray  # noqa: F401
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
 import config
 import config_loader
 import player_control
@@ -79,15 +86,19 @@ TTS_PHRASES = {
     "next": "Next track",
     "previous": "Previous track",
     "volume_set": "Volume set",
+    "listen_on": "Listening resumed",
+    "listen_off": "Listening paused",
 }
 
 
-def setup_logging() -> logging.Logger:
+def setup_logging(console_level: int = logging.INFO) -> logging.Logger:
+    """Configure console + file logging. In tray mode pass logging.ERROR for the console."""
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     console = logging.StreamHandler()
+    console.setLevel(console_level)
     console.setFormatter(formatter)
 
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
@@ -96,6 +107,20 @@ def setup_logging() -> logging.Logger:
     logger.addHandler(console)
     logger.addHandler(file_handler)
     return logger
+
+
+def _console(text: str) -> None:
+    """Print a status line to the console without relying on the log level.
+
+    Tray mode sets the console handler to ERROR, so plain logging.info is not
+    visible; these indicators are deliberately printed directly. Safe when the
+    process has no console (pythonw.exe sets sys.stdout to None).
+    """
+    try:
+        if sys.stdout is not None:
+            print(text)
+    except Exception:
+        pass
 
 
 def dependency_report() -> list[str]:
@@ -188,14 +213,47 @@ def speak_feedback(tts_cfg, action: str | None = None, failed: bool = False, vol
         )
 
 
-def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg) -> None:
+def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg, state=None) -> None:
+    """Execute a recognized command.
+
+    `state` is a shared dict whose "listening" boolean gates processing: while
+    paused, only the listen_on/listen_off commands are honored. The tray icon
+    and those two voice commands toggle the flag.
+    """
+    if state is None:
+        state = {"listening": True}
+
+    indicators = bool(state.get("indicators", False))
+
     action = config.match_command(text)
+
+    if action == "listen_on":
+        state["listening"] = True
+        log.info("Listening resumed (voice command)")
+        if indicators:
+            _console("Listener: ON")
+        speak_feedback(tts_cfg, action)
+        return
+    if action == "listen_off":
+        state["listening"] = False
+        log.info("Listening paused (voice command)")
+        if indicators:
+            _console("Listener: OFF")
+        speak_feedback(tts_cfg, action)
+        return
+
+    if not state.get("listening", True):
+        log.info("Listener paused; ignoring command: %r", text)
+        return
+
     if action is None:
         volume = config.parse_volume_command(text)
         if volume is None:
             log.info("No matching command for: %r", text)
             return
         log.info("Numeric volume command: %r -> %d%%", text, volume)
+        if indicators:
+            _console(f"Command: set_volume to {volume}")
         try:
             controller.set_volume(volume)
         except Exception:
@@ -204,7 +262,10 @@ def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg
             return
         speak_feedback(tts_cfg, volume=volume)
         return
+
     log.info("Recognized command: %r -> %s", text, action)
+    if indicators:
+        _console(f"Command: {action} ({text!r})")
     if action == "exit":
         log.info("Exit requested")
         speak_feedback(tts_cfg, action)
@@ -224,6 +285,10 @@ def process_recognized(listener, controller, text: str, log: logging.Logger, tts
     if not text:
         return
 
+    verbose = getattr(wake_cfg, "wake_debug", False) or bool(state.get("indicators", False))
+    if verbose:
+        _console(f"Raw recognized text: {text!r}")
+
     if wake_cfg.enabled:
         now = time.time()
         if state["armed"]:
@@ -232,13 +297,17 @@ def process_recognized(listener, controller, text: str, log: logging.Logger, tts
                 log.info("Wake command timeout; listening for a wake phrase again")
             else:
                 state["armed"] = False
-                handle_command(listener, controller, text, log, tts_cfg)
+                handle_command(listener, controller, text, log, tts_cfg, state)
                 return
 
         phrase, remainder = config.detect_wake_phrase(text, wake_cfg.phrases)
         if phrase is None:
+            if verbose:
+                _console("No wake phrase detected")
             log.info("Ignored speech without wake phrase: %r", text)
             return
+        if verbose:
+            _console(f"Wake phrase detected: {phrase!r}; remaining command: {remainder!r}")
         if not remainder:
             state["armed"] = True
             state["armed_at"] = now
@@ -248,10 +317,10 @@ def process_recognized(listener, controller, text: str, log: logging.Logger, tts
             )
             return
         log.debug("Executing command from wake remainder: %r", remainder)
-        handle_command(listener, controller, remainder, log, tts_cfg)
+        handle_command(listener, controller, remainder, log, tts_cfg, state)
         return
 
-    handle_command(listener, controller, text, log, tts_cfg)
+    handle_command(listener, controller, text, log, tts_cfg, state)
 
 
 def run_once(listener: VoiceListener, controller, log: logging.Logger, tts_cfg, wake_cfg, state) -> None:
@@ -260,6 +329,15 @@ def run_once(listener: VoiceListener, controller, log: logging.Logger, tts_cfg, 
         log.info("Nothing heard")
         return
     process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
+
+
+def run_continuous(listener: VoiceListener, controller, log: logging.Logger, tts_cfg, wake_cfg, state) -> None:
+    """Run the listen loop until the listener is stopped. Used by normal and tray modes."""
+    listener.listen_loop(
+        lambda text: process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
+    )
+    while listener.running:
+        listener.wait_stop(timeout=1)
 
 
 def build_wake_cfg(args, cfg, log) -> SimpleNamespace:
@@ -273,6 +351,7 @@ def build_wake_cfg(args, cfg, log) -> SimpleNamespace:
         enabled=enabled,
         phrases=list(cfg.wake.phrases),
         timeout_seconds=cfg.wake.timeout_seconds,
+        wake_debug=bool(getattr(args, "wake_debug", False)),
     )
 
 
@@ -417,8 +496,177 @@ def run_energy_test(listener: VoiceListener, duration: float = 5.0, interval: fl
         print("Your microphone is quiet; a lower threshold makes quiet speech easier to detect.")
 
 
+def startup_shortcut_path() -> Path:
+    """Return the path of the run-at-startup shortcut used by --install-startup/--uninstall-startup."""
+    if sys.platform != "win32":
+        raise OSError("Auto-start is only supported on Windows")
+    startup_dir = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup"
+    return startup_dir / "Voice Media Player.lnk"
+
+
+def install_startup(shortcut_path: Path) -> bool:
+    """Create a Startup-folder shortcut that runs src/main.py --tray via pythonw."""
+    from tray import _tray_available
+
+    python_dir = Path(sys.executable).parent
+    target = python_dir / ("pythonw.exe" if sys.platform == "win32" else "pythonw")
+
+    main_py = (config_loader.PROJECT_ROOT / "src" / "main.py").resolve()
+    if not Path(target).exists():
+        raise OSError(
+            f"pythonw.exe not found at {target}. Auto-start requires a Windows Python "
+            "install alongside python.exe."
+        )
+    if not _tray_available():
+        raise OSError("pystray is not installed, so tray mode is unavailable; cannot install auto-start")
+
+    arguments = f'"{main_py}" --tray'
+    working = str(main_py.parent)
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            (
+                "$w = New-Object -ComObject WScript.Shell;"
+                f"$s = $w.CreateShortcut('{shortcut_path.resolve()}');"
+                f"$s.TargetPath = '{target}';"
+                f"$s.Arguments = '{arguments}';"
+                f"$s.WorkingDirectory = '{working}';"
+                "$s.Save()"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise OSError(f"Failed to create shortcut: {result.stderr.strip()}")
+    return True
+
+
+def uninstall_startup(shortcut_path: Path) -> bool:
+    """Remove the Startup-folder shortcut if it exists."""
+    if shortcut_path.exists():
+        shortcut_path.unlink()
+        return True
+    return False
+
+
+def _register_hotkey(icon, state, hotkey: str, log: logging.Logger, verbose: bool = False) -> None:
+    """Register a global hotkey that toggles listening, even while the app is in the background."""
+    if not HAS_KEYBOARD:
+        log.warning("keyboard module is not installed; cannot register hotkey %r", hotkey)
+        return
+
+    def toggle() -> None:
+        try:
+            from tray import _show_popup
+
+            state["listening"] = not bool(state.get("listening", True))
+            log.info("Hotkey %s: listening toggled to %s", hotkey, "on" if state["listening"] else "off")
+            if verbose:
+                _console(f"Listener: {'ON' if state['listening'] else 'OFF'}")
+            _show_popup(f"Voice control {'resumed' if state['listening'] else 'paused'}")
+            refresh = getattr(icon, "_refresh_image", None)
+            if refresh:
+                refresh()
+        except Exception:
+            log.exception("Hotkey toggle failed")
+
+    try:
+        keyboard.add_hotkey(hotkey, toggle)
+        log.info("Global hotkey registered: %s", hotkey)
+    except Exception:
+        log.exception("Failed to register global hotkey %s", hotkey)
+
+
+def run_test_tray(log: logging.Logger) -> None:
+    """Run only the tray icon (no voice listener) so the tray menu can be verified manually.
+
+    The listener is never started; the "Start/Stop Listening" items just flip the
+    icon color. The app exits after 30 seconds or when "Exit" is chosen.
+    """
+    from tray import create_tray_icon, _tray_available
+
+    if not _tray_available():
+        message = "pystray is not installed; cannot run --test-tray (install with: pip install pystray pillow)"
+        log.warning("%s", message)
+        print(message)
+        return
+
+    class _StubListener:
+        running = False
+
+        def stop(self) -> None:
+            pass
+
+    state = {"listening": True, "indicators": True}
+    icon = create_tray_icon(_StubListener(), None, state=state, verbose=True)
+    if icon is None:
+        print("Could not create the tray icon.")
+        return
+
+    timer = threading.Timer(30.0, icon.stop)
+    timer.daemon = True
+    timer.start()
+
+    print("Test-tray mode: the voice listener is NOT running.")
+    print("Use the tray menu 'Start Listening'/'Stop Listening' to check the icon changes.")
+    print("The app exits after 30 seconds or when you choose Exit in the tray menu.")
+    try:
+        icon.run()
+    except Exception:
+        log.exception("Tray icon failed in test mode")
+    finally:
+        log.info("Test-tray shutdown complete")
+
+
+def run_tray(listener, controller, log: logging.Logger, tts_cfg, wake_cfg, state, hotkey=None) -> None:
+    """Run the listen loop in a background thread with the tray icon on the main thread."""
+    from tray import create_tray_icon, _draw_mic, _show_popup
+
+    show_indicators = bool(state.get("indicators", False))
+
+    icon = create_tray_icon(listener, controller, state=state, verbose=show_indicators)
+    if not icon:
+        log.warning("Tray is unavailable; falling back to terminal mode")
+        run_continuous(listener, controller, log, tts_cfg, wake_cfg, state)
+        return
+
+    if hotkey:
+        _register_hotkey(icon, state, hotkey, log, verbose=show_indicators)
+
+    worker = threading.Thread(
+        target=run_continuous,
+        args=(listener, controller, log, tts_cfg, wake_cfg, state),
+        daemon=True,
+    )
+    worker.start()
+
+    log.info(
+        "Tray mode active. Look for the microphone icon in the system tray. "
+        "Exit the app from the tray menu (this console can be closed)."
+    )
+    if show_indicators:
+        _console(f"Listener: {'ON' if state.get('listening', True) else 'OFF'}")
+    if sys.stdout is not None:
+        print(
+            "Tray mode active. Right-click the microphone icon in the system tray "
+            "to control the app, then close this window."
+        )
+
+    try:
+        icon.run()
+    except Exception:
+        log.exception("Tray icon failed")
+    finally:
+        listener.stop()
+        worker.join(timeout=2)
+        log.info("Shutdown complete")
+
+
 def main(argv: list[str] | None = None) -> None:
-    log = setup_logging()
     parser = argparse.ArgumentParser(description="Voice-controlled media player")
     parser.add_argument(
         "--player",
@@ -516,7 +764,63 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Override voice.energy_threshold for this run (e.g. --set-energy 100)",
     )
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="Run in the background with a system-tray icon (requires pystray)",
+    )
+    parser.add_argument(
+        "--test-tray",
+        action="store_true",
+        help="Run only the tray icon without the voice listener (manual menu test, exits after 30s)",
+    )
+    parser.add_argument(
+        "--hotkey",
+        default="ctrl+shift+l",
+        help="Global hotkey to toggle listening on/off while in the background "
+        "(default: 'ctrl+shift+l'; requires the keyboard module)",
+    )
+    parser.add_argument(
+        "--wake-debug",
+        action="store_true",
+        help="Print the raw recognized text and whether a wake phrase was detected",
+    )
+    parser.add_argument(
+        "--install-startup",
+        action="store_true",
+        help="Create a Windows Startup-folder shortcut that launches the app at logon, then exit",
+    )
+    parser.add_argument(
+        "--uninstall-startup",
+        action="store_true",
+        help="Remove the Windows Startup-folder shortcut installed by --install-startup, then exit",
+    )
     args = parser.parse_args(argv)
+
+    log = setup_logging(console_level=logging.ERROR if args.tray else logging.INFO)
+
+    if args.install_startup or args.uninstall_startup:
+        if sys.platform != "win32":
+            print("ERROR: --install-startup/--uninstall-startup are only supported on Windows.", file=sys.stderr)
+            return
+        shortcut = startup_shortcut_path()
+        try:
+            if args.install_startup:
+                install_startup(shortcut)
+                print("Auto-start installed. The app will launch with the tray icon at every logon.")
+                print(f"  Shortcut: {shortcut}")
+            elif uninstall_startup(shortcut):
+                print("Auto-start removed.")
+                print(f"  Shortcut: {shortcut}")
+            else:
+                print("No auto-start shortcut was found.")
+        except OSError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        return
+
+    if args.test_tray:
+        run_test_tray(log)
+        return
 
     if args.debug:
         log.info("Debug mode enabled")
@@ -614,22 +918,31 @@ def main(argv: list[str] | None = None) -> None:
         else:
             print("Mic info unavailable")
 
-    state = {"armed": False, "armed_at": 0.0}
+    state = {
+        "listening": True,
+        "armed": False,
+        "armed_at": 0.0,
+        "indicators": bool(args.tray and args.debug),
+    }
 
     log.info(
         "Starting voice-controlled media player (player=%s, recognizer=%s)",
         args.player,
         recognizer_type,
     )
-    print(f"Listening... player={args.player} recognizer={recognizer_type}. Press Ctrl+C to stop.")
+
+    if args.tray and (not HAS_TRAY or not tray._tray_available()):
+        log.warning("pystray is not installed; falling back to terminal mode")
+        args.tray = False
+
+    if not args.tray:
+        print(f"Listening... player={args.player} recognizer={recognizer_type}. Press Ctrl+C to stop.")
 
     try:
-        if args.continuous:
-            listener.listen_loop(
-                lambda text: process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
-            )
-            while listener.running:
-                listener.wait_stop(timeout=1)
+        if args.tray:
+            run_tray(listener, controller, log, tts_cfg, wake_cfg, state, hotkey=args.hotkey)
+        elif args.continuous:
+            run_continuous(listener, controller, log, tts_cfg, wake_cfg, state)
         else:
             run_once(listener, controller, log, tts_cfg, wake_cfg, state)
     except KeyboardInterrupt:

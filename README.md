@@ -68,6 +68,7 @@ python src/main.py --player auto --continuous
 | `--no-tts`     | Force-disable text-to-speech feedback (overrides config).       |
 | `--tts-engine` | TTS backend: `auto` (default), `pyttsx3`, `powershell`, `say`, `espeak`, or `system`. |
 | `--no-wake`    | Disable the wake-word requirement (overrides config).           |
+| `--wake-debug` | Print the raw recognized text and whether a wake phrase was detected. |
 | `--debug`      | Enable debug logging (raw recognized text, mic details, audio levels). |
 | `--recognizer` | Speech recognizer: `google` (online), `vosk` (offline), or `auto` (default: config or auto). |
 | `--mic-index`  | Microphone device index to use (list them with `--list-mics`).  |
@@ -77,6 +78,11 @@ python src/main.py --player auto --continuous
 | `--record-test`| Record 3 seconds of microphone audio to `test_audio.wav`, play it back, and exit. |
 | `--energy-test`| Measure audio energy for 5 seconds and suggest a value for `voice.energy_threshold`, then exit. |
 | `--set-energy` | Override `voice.energy_threshold` for this run (e.g. `--set-energy 100`). |
+| `--tray`       | Run in the background with a system-tray icon (requires `pystray`; automatic terminal fallback if missing). |
+| `--test-tray`  | Run only the tray icon **without** the voice listener, so the tray menu can be verified manually; exits after 30 seconds or via the tray menu. |
+| `--hotkey`     | Global hotkey that toggles listening on/off while running in the background (default: `ctrl+shift+l`; requires `keyboard`). |
+| `--install-startup` | Windows only: create a Startup-folder shortcut that launches the app with the tray icon at logon, then exit. |
+| `--uninstall-startup` | Windows only: remove the Startup-folder shortcut created by `--install-startup`, then exit. |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
 
 ### Health check
@@ -89,6 +95,92 @@ python src/main.py --check-deps
 
 It reports which of `speech_recognition`, `pyaudio`, `requests`, `keyboard`, `python-vlc`, `vosk`, and `pyttsx3`
 are available, and tests the TTS setup (it speaks a short test phrase if TTS works).
+
+## Background Mode and System Tray
+
+The app can run in the background with an icon in the Windows system tray. Install the optional extra:
+
+```powershell
+pip install pystray pillow
+```
+
+Then launch it in tray mode:
+
+```powershell
+python src/main.py --tray
+```
+
+- A microphone icon appears in the tray: **green** while it is actively listening, **red** while paused.
+  Listening starts **on** by default — you do not have to enable it after starting the app.
+- Right-click for the menu:
+  - **Start Listening/Stop Listening** — toggle voice recognition without closing the app (same as the
+    `listen_on`/`listen_off` voice commands). The label shows **Stop Listening** while listening is on and
+    **Start Listening** while it is paused.
+  - **Show Status** — pop-up with whether it is listening and which player it found.
+  - **Exit** — shuts the app down.
+- The console window stays open for logs. If `pystray` is not installed, `--tray` falls back to terminal mode.
+
+### Global hotkey to toggle listening
+
+While in tray mode you can toggle listening on/off with a keyboard shortcut, even when the app is in the
+background — handy if the wake word isn't working, or to quickly mute listening during a loud scene:
+
+```powershell
+python src/main.py --tray                     # default hotkey: Ctrl+Shift+L
+python src/main.py --tray --hotkey ctrl+alt+v # pick a different combination
+```
+
+Pressing the hotkey toggles the listener and updates the tray icon (green/red). It requires the `keyboard`
+module; if it is missing, the hotkey is skipped with a warning.
+
+### Debug indicators in the console
+
+Run tray mode with `--debug` to see live status lines in the console window:
+
+```powershell
+python src/main.py --tray --debug
+```
+
+- `Listener: ON` / `Listener: OFF` — printed when the app starts and every time you toggle listening
+  (tray menu, hotkey, or voice command).
+- `Wake phrase detected: '...'; remaining command: '...'` — printed when a wake phrase is heard.
+- `Command: <action>` — printed whenever a command is recognized and executed, so you can confirm the app works.
+- `Raw recognized text: '...'` — use `--wake-debug` (below) to always print this, even outside tray mode.
+
+### Isolate tray problems with `--test-tray`
+
+If tray mode "doesn't respond to voice", first check the tray menu itself in isolation:
+
+```powershell
+python src/main.py --test-tray
+```
+
+This runs the tray icon with **no voice listener** (no microphone needed). You can click **Start
+Listening**/**Stop Listening** to verify the icon changes color and the menu works. The app exits after 30
+seconds or when you choose **Exit**. If the menu works here but voice is still ignored, the problem is the
+listener, not the tray.
+
+### Run without a console window (Windows)
+
+Launch via `pythonw` so no console is created — only errors are logged (to a file). From inside the
+activated virtual environment:
+
+```powershell
+.venv\Scripts\pythonw.exe src\main.py --tray
+```
+
+### Start at every logon (Windows)
+
+```powershell
+# Creates a shortcut in the Startup folder that runs pythonw + --tray
+python src/main.py --install-startup
+
+# Remove it again
+python src/main.py --uninstall-startup
+```
+
+`--install-startup` checks that `pythonw.exe` exists next to your `python.exe` (a standard Windows Python) and that
+`pystray` is installed, and refuses otherwise.
 
 ## Configuration
 
@@ -174,15 +266,23 @@ conversation. Configure it under `wake`:
 ```json
 "wake": {
     "enabled": true,
-    "phrases": ["hey player", "hello player", "player"],
+    "phrases": ["hey player", "hello player", "player", "hey"],
     "timeout_seconds": 3
 }
 ```
 
 - `enabled`: set to `false` to process every utterance as a command.
-- `phrases`: phrases (case-insensitive) that arm the app for a command. Detection uses word boundaries and
-  ignores punctuation around the phrase ("hey player - play" works), and the longest matching phrase wins.
+- `phrases`: phrases (case-insensitive) that arm the app for a command. Detection strips punctuation and
+  extra spaces, then matches the phrase **anywhere** in the text (not just at the start) at word boundaries;
+  the longest matching phrase wins. The defaults include the short, easy-to-recognize variants `player`
+  and `hey` on their own.
 - `timeout_seconds`: if you say just the wake phrase, the app waits this long for the follow-up command.
+
+To see exactly what the recognizer heard and whether it counted as a wake phrase, run with `--wake-debug`:
+
+```bash
+python src/main.py --player vlc --wake-debug --single
+```
 
 Examples:
 
@@ -215,7 +315,12 @@ and the longest matching phrase wins ("stop playing" pauses, while "stop" alone 
 | `exit`          | exit, quit app, close, shutdown, terminate                                       |
 | `next`          | next, next track, next video, next episode, skip to next                         |
 | `previous`      | previous, previous track, go back a chapter, back chapter                        |
+| `listen_on`     | start listening, listen, turn on listening, resume listening                     |
+| `listen_off`    | stop listening, pause listening, turn off listening                              |
 | `volume_set`    | (special — handled by numeric parsing, see below)                                |
+
+> Note: `silence` maps to `mute` (above), not to `listen_off` — the longest matching phrase wins, so the mute
+> action is preserved.
 
 Extend any action by adding phrases to the list in `config.json`, e.g.:
 
@@ -241,6 +346,13 @@ parsed as an absolute volume, clamped to 0-100. Any number found in the phrase i
 These are processed only when the phrase does **not** match a regular command first, so relative commands like
 "volume up"/"volume down" win over numeric parsing. Numeric volume is sent to the player through its web
 interface (`command=volume&val=N` for VLC, `volume=N` for MPC-HC).
+
+### Pause and resume listening
+
+The `listen_on`/`listen_off` commands and the tray menu toggle the same "listening" flag. When paused, every
+utterance except `listen_on` is ignored, and the tray icon turns red. The app says "Listening paused"/"Listening
+resumed" so the toggle is audible. This is also the cleanest way to stop the app from reacting while you talk
+over a movie.
 
 ## Speech Recognition
 
@@ -360,7 +472,7 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 
 ```
 .
-+-- src/                    # Source code (config, voice listener, player controllers, main)
++-- src/                    # Source code (config, voice listener, player controllers, tray icon, main)
 +-- tests/                  # Unit tests (mocked microphone)
 +-- config.example.json     # Committed template; copy to config.json and edit
 +-- requirements.txt
@@ -374,6 +486,18 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.
+- **Tray mode doesn't respond to voice** → Work through these steps in order:
+  1. Check the tray icon color: **green** means listening is on, **red** means it is paused. If it is red,
+     right-click the tray menu and choose **Start Listening**, or press the global hotkey (`Ctrl+Shift+L` by default).
+  2. Verify the listener is actually running with `--test-tray`: if the tray menu works there but not in
+     `--tray`, the problem is the voice listener, not the tray.
+  3. Run `python src/main.py --tray --debug` and watch the console for `Raw recognized text` / `Wake phrase
+     detected` / `Command: ...` lines — they confirm the mic is picking up your voice and commands are firing.
+  4. Confirm the wake phrase is being recognized — run `python src/main.py --wake-debug --single`, say "hey player",
+     and check that the app reports "Wake phrase detected". If the raw text is empty, see "Nothing heard /
+     no audio device" below; if the raw text exists but no wake phrase is detected, switch to `--recognizer vosk`.
+  5. If the wake word is still unreliable, disable it entirely with `--no-wake`, or add your exact phrasing to
+     `wake.phrases` in `config.json` (matching now allows the phrase anywhere in the sentence).
 - **Nothing heard / no audio device** → Check that your microphone is the default input device and not muted.
 - **`Could not understand the audio`** → The microphone picked up speech but recognition failed. Raise the
   `voice.timeout_seconds` value, move closer to the mic, reduce background noise, and run with `--debug` to see the
@@ -381,6 +505,14 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`Vosk model download` fails** → The ~50 MB model is fetched from `alphacephei.com` on first `vosk` use. If the
   download fails or you are offline, download `vosk-model-small-en-us-0.15.zip` yourself, unzip it, and set
   `vosk_model_path` in the `recognizer` config section to the unzipped folder.
+- **The app reacts to movie/TV dialogue** → Movie soundtracks are full of commands like "pause" or "stop". Use a
+  wake phrase (turn on `wake` in config), or literally pause listening while watching: say "stop listening" (or use
+  the tray menu **Stop Listening**), then "start listening" when you want commands again. TTS feedback ("Listening
+  paused") may itself be picked up by the mic through the speakers — use a **headset** or move the mic away from
+  the speakers.
+- **The app hears itself (TTS feedback loop)** → TTS feedback is spoken by your speakers and re-recorded by the
+  mic. Put on a headset so the mic doesn't hear the speakers, lower TTS with `--no-tts`, or pause listening right
+  after issuing a command.
 - **My voice isn't being recognized** → Work through these steps in order:
   1. Confirm the mic captures audio: `python src/main.py --record-test`. Play back `test_audio.wav` — if it is
      silent, the mic is muted, not the default input device, or too quiet.

@@ -553,6 +553,32 @@ class TestWakePhraseHelpers(unittest.TestCase):
         self.assertEqual(remainder, "play volume up")
 
 
+class TestWakePhraseVariations(unittest.TestCase):
+    def test_hey_stands_alone(self):
+        phrase, remainder = config.detect_wake_phrase("hey play", ["hey player", "player", "hey"])
+        self.assertEqual(phrase, "hey")
+        self.assertEqual(remainder, "play")
+
+    def test_wake_phrase_anywhere_including_end(self):
+        phrase, remainder = config.detect_wake_phrase("play hey player", ["hey player", "hey"])
+        self.assertEqual(phrase, "hey player")
+        self.assertEqual(remainder, "play")
+
+    def test_hey_player_wins_over_hey(self):
+        phrase, _ = config.detect_wake_phrase("hey player pause", ["hey player", "hey"])
+        self.assertEqual(phrase, "hey player")
+
+    def test_extra_spaces_and_punctuation_stripped(self):
+        phrase, remainder = config.detect_wake_phrase(" hey   player !!! pause ", ["hey player"])
+        self.assertEqual(phrase, "hey player")
+        self.assertEqual(remainder, "pause")
+
+    def test_hey_arms_following_command(self):
+        phrases = ["hey player", "hello player", "player", "hey"]
+        _, remainder = config.detect_wake_phrase("hey, turn it down", phrases)
+        self.assertEqual(remainder, "turn it down")
+
+
 FAKE_LOG = logging.getLogger("test")
 
 
@@ -651,6 +677,157 @@ class TestWakeConfig(unittest.TestCase):
         args = SimpleNamespace(single=False, no_wake=True)
         cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
         self.assertFalse(cfg.enabled)
+
+    def test_wake_debug_flag_is_passed_through(self):
+        args = SimpleNamespace(single=False, no_wake=False, wake_debug=True)
+        cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
+        self.assertTrue(cfg.wake_debug)
+
+    def test_wake_debug_off_by_default(self):
+        args = SimpleNamespace(single=False, no_wake=False, wake_debug=False)
+        cfg = main.build_wake_cfg(args, self._cfg(), FAKE_LOG)
+        self.assertFalse(cfg.wake_debug)
+
+
+class TestConsoleIndicators(unittest.TestCase):
+    def _state(self, indicators):
+        return {"listening": True, "armed": False, "armed_at": 0.0, "indicators": indicators}
+
+    def test_handle_command_prints_command_indicator(self):
+        controller = _FakeCommandController()
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        state = self._state(True)
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, state)
+        self.assertIn("Command: play", buffer.getvalue())
+        self.assertEqual(controller.calls, ["play"])
+
+    def test_no_command_indicator_without_flag(self):
+        controller = _FakeCommandController()
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg)
+        self.assertEqual(buffer.getvalue(), "")
+
+    def test_listen_off_prints_listener_state(self):
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.handle_command(
+                _FakeStopListener(), _FakeCommandController(), "stop listening", FAKE_LOG, tts_cfg, self._state(True)
+            )
+        self.assertIn("Listener: OFF", buffer.getvalue())
+
+    def test_listen_on_prints_listener_state(self):
+        state = self._state(True)
+        state["listening"] = False
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.handle_command(
+                _FakeStopListener(), _FakeCommandController(), "start listening", FAKE_LOG, tts_cfg, state
+            )
+        self.assertIn("Listener: ON", buffer.getvalue())
+
+    def test_wake_debug_prints_raw_text_and_detection(self):
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        wake_cfg = SimpleNamespace(
+            enabled=True,
+            phrases=["hey player", "hello player", "player", "hey"],
+            timeout_seconds=3,
+            wake_debug=True,
+        )
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.process_recognized(
+                _FakeStopListener(), _FakeCommandController(), "hey player, pause",
+                FAKE_LOG, tts_cfg, wake_cfg, self._state(False),
+            )
+        out = buffer.getvalue()
+        self.assertIn("Raw recognized text: 'hey player, pause'", out)
+        self.assertIn("Wake phrase detected: 'hey player'", out)
+        self.assertIn("remaining command: 'pause'", out)
+
+    def test_wake_debug_prints_when_no_phrase(self):
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        wake_cfg = SimpleNamespace(
+            enabled=True,
+            phrases=["hey player"],
+            timeout_seconds=3,
+            wake_debug=True,
+        )
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.process_recognized(
+                _FakeStopListener(), _FakeCommandController(), "volume up",
+                FAKE_LOG, tts_cfg, wake_cfg, self._state(False),
+            )
+        out = buffer.getvalue()
+        self.assertIn("Raw recognized text: 'volume up'", out)
+        self.assertIn("No wake phrase detected", out)
+
+    def test_no_wake_debug_no_output(self):
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        wake_cfg = SimpleNamespace(enabled=True, phrases=["hey player"], timeout_seconds=3)
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            main.process_recognized(
+                _FakeStopListener(), _FakeCommandController(), "hey player pause",
+                FAKE_LOG, tts_cfg, wake_cfg, self._state(False),
+            )
+        self.assertEqual(buffer.getvalue(), "")
+
+
+class TestHotkey(unittest.TestCase):
+    def test_hotkey_registers_and_toggles_listening(self):
+        fake_icon = MagicMock()
+        fake_icon._refresh_image = MagicMock()
+        state = {"listening": True, "armed": False, "armed_at": 0.0, "indicators": False}
+        fake_kb = types.ModuleType("keyboard")
+        fake_kb.add_hotkey = MagicMock(return_value=None)
+        with patch.object(main, "HAS_KEYBOARD", True):
+            with patch.object(main, "keyboard", fake_kb):
+                with patch("tray.subprocess.Popen") as mock_popen:
+                    with patch("tray._show_popup") as mock_popup:
+                        main._register_hotkey(fake_icon, state, "ctrl+shift+l", FAKE_LOG)
+                        hotkey, callback = fake_kb.add_hotkey.call_args[0]
+                        self.assertEqual(hotkey, "ctrl+shift+l")
+                        callback()
+                        mock_popup.assert_called_once()
+        self.assertFalse(state["listening"])
+        self.assertEqual(fake_icon._refresh_image.call_count, 1)
+
+    def test_hotkey_skipped_without_keyboard(self):
+        fake_icon = MagicMock()
+        state = {"listening": True}
+        with patch.object(main, "HAS_KEYBOARD", False):
+            main._register_hotkey(fake_icon, state, "ctrl+shift+l", FAKE_LOG)
+        self.assertTrue(state["listening"])
+
+
+class TestTestTray(unittest.TestCase):
+    def test_test_tray_creates_icon_without_listener(self):
+        fake_icon = MagicMock()
+        with patch("tray._tray_available", return_value=True):
+            with patch("tray.create_tray_icon", return_value=fake_icon) as mock_create:
+                with patch("threading.Timer", MagicMock()):
+                    with redirect_stdout(StringIO()):
+                        main.run_test_tray(FAKE_LOG)
+        mock_create.assert_called_once()
+        args, kwargs = mock_create.call_args
+        listener = args[0]
+        self.assertFalse(listener.running)
+        self.assertTrue(kwargs["verbose"])
+        fake_icon.run.assert_called_once()
+
+    def test_test_tray_warns_without_pystray(self):
+        buffer = StringIO()
+        with patch("tray._tray_available", return_value=False):
+            with redirect_stdout(buffer):
+                main.run_test_tray(FAKE_LOG)
+        self.assertIn("pystray is not installed", buffer.getvalue())
 
 
 class TestWakeTrainingAnalysis(unittest.TestCase):
@@ -872,6 +1049,91 @@ class TestNumericVolumeCommands(unittest.TestCase):
         mock_speak.assert_called_once_with(
             "Command failed", voice_id=None, engine="auto", fallback_enabled=True
         )
+
+
+class TestListenerToggleCommands(unittest.TestCase):
+    def _setup(self):
+        controller = _FakeCommandController()
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        listener = _FakeStopListener()
+        state = {"listening": True, "armed": False, "armed_at": 0.0}
+        return listener, controller, tts_cfg, state
+
+    def test_all_listen_phrases_map_to_their_action(self):
+        for phrase in ["start listening", "listen", "turn on listening", "resume listening"]:
+            self.assertEqual(config.match_command(phrase), "listen_on")
+        for phrase in ["stop listening", "pause listening", "turn off listening"]:
+            self.assertEqual(config.match_command(phrase), "listen_off")
+
+    def test_listen_off_pauses(self):
+        _, _, tts_cfg, state = self._setup()
+        main.handle_command(_FakeStopListener(), _FakeCommandController(), "stop listening", FAKE_LOG, tts_cfg, state)
+        self.assertFalse(state["listening"])
+
+    def test_listen_on_resumes(self):
+        _, _, tts_cfg, state = self._setup()
+        state["listening"] = False
+        main.handle_command(_FakeStopListener(), _FakeCommandController(), "start listening", FAKE_LOG, tts_cfg, state)
+        self.assertTrue(state["listening"])
+
+    def test_commands_ignored_while_paused(self):
+        _, controller, tts_cfg, state = self._setup()
+        state["listening"] = False
+        main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, state)
+        main.handle_command(_FakeStopListener(), controller, "set volume to 30", FAKE_LOG, tts_cfg, state)
+        self.assertEqual(controller.calls, [])
+
+    def test_paused_listener_still_honors_listen_on(self):
+        _, controller, tts_cfg, state = self._setup()
+        state["listening"] = False
+        main.handle_command(_FakeStopListener(), controller, "yes play", FAKE_LOG, tts_cfg, state)
+        self.assertEqual(controller.calls, [])
+        main.handle_command(_FakeStopListener(), controller, "listen", FAKE_LOG, tts_cfg, state)
+        self.assertTrue(state["listening"])
+        main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, state)
+        self.assertEqual(controller.calls, ["play"])
+
+    def test_toggle_through_process_recognized(self):
+        _, controller, tts_cfg, state = self._setup()
+        wake_cfg = SimpleNamespace(enabled=False, phrases=[], timeout_seconds=3)
+        main.process_recognized(_FakeStopListener(), controller, "turn off listening", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertFalse(state["listening"])
+        main.process_recognized(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertEqual(controller.calls, [])
+        main.process_recognized(_FakeStopListener(), controller, "turn on listening", FAKE_LOG, tts_cfg, wake_cfg, state)
+        main.process_recognized(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg, wake_cfg, state)
+        self.assertEqual(controller.calls, ["play"])
+
+    def test_listen_off_speaks_feedback(self):
+        tts_cfg = SimpleNamespace(enabled=True, voice_id=None, engine="auto", fallback_enabled=True)
+        state = {"listening": True, "armed": False, "armed_at": 0.0}
+        with patch("main.tts.speak") as mock_speak:
+            main.handle_command(_FakeStopListener(), _FakeCommandController(), "stop listening", FAKE_LOG, tts_cfg, state)
+        mock_speak.assert_called_once_with("Listening paused", voice_id=None, engine="auto", fallback_enabled=True)
+
+    def test_state_defaults_to_listening(self):
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        controller = _FakeCommandController()
+        main.handle_command(_FakeStopListener(), controller, "play", FAKE_LOG, tts_cfg)
+        self.assertEqual(controller.calls, ["play"])
+
+
+class TestStartupHelpers(unittest.TestCase):
+    def test_uninstall_startup_returns_false_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(main.uninstall_startup(Path(tmp) / "missing.lnk"))
+
+    def test_uninstall_startup_removes_existing_shortcut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shortcut = Path(tmp) / "Voice Media Player.lnk"
+            shortcut.write_text("stub")
+            self.assertTrue(main.uninstall_startup(shortcut))
+            self.assertFalse(shortcut.exists())
+
+    def test_install_startup_requires_tray_support(self):
+        with patch("tray._tray_available", return_value=False), tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(OSError):
+                main.install_startup(Path(tmp) / "Voice Media Player.lnk")
 
 
 class TestMainFeedback(unittest.TestCase):
