@@ -23,6 +23,13 @@
     "engine": "auto",
     "vosk_model_path": null
   },
+  "gesture": {
+    "camera_id": 0,
+    "debounce_frames": 3,
+    "cooldown_seconds": 0.5,
+    "swipe_threshold": 0.12,
+    "model_path": null
+  },
   "player": {
     "default_skip_seconds": 10,
     "volume_step": 5

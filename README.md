@@ -112,6 +112,12 @@ Webcam hand gestures are the default input. Uses OpenCV + MediaPipe (offline, fr
 pip install opencv-python mediapipe numpy
 ```
 
+Two MediaPipe generations are supported automatically: MediaPipe **0.x** uses the legacy
+`mediapipe.solutions.hands` API, while MediaPipe **1.x** (which removed `solutions`) uses the new
+Tasks API (`HandLandmarker`). With 1.x, the hand-landmarker model (~8 MB) is downloaded automatically on
+the first run to `~/.cache/mediapipe/hand_landmarker.task`. To use a pre-downloaded model instead, set
+`gesture.model_path` in `config.json` or the `MEDIAPIPE_HAND_MODEL` environment variable.
+
 The gesture-to-action mapping:
 
 | Gesture            | Action               | Notes                          |
@@ -133,9 +139,27 @@ motion can't double-trigger. Hold your hand up, make the shape, and move it back
 - `--camera` selects which webcam to read (default `0`). The tray menu also has a **Next Camera** item when running
   in gesture tray mode.
 - `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit.
-- If the gesture dependencies or the camera are unavailable, the app prints a clear error and exits; use
+- If the gesture dependencies, model, or camera are unavailable, the app prints a clear error and exits; use
   `--mode voice` to fall back to voice control, or `--mode both` to run both inputs at once.
 - For quick tests, `--mode gesture --single` waits for one gesture, fires it, and exits.
+
+Gesture tuning lives under the `gesture` section in `config.json`:
+
+```json
+"gesture": {
+    "camera_id": 0,
+    "debounce_frames": 3,
+    "cooldown_seconds": 0.5,
+    "swipe_threshold": 0.12,
+    "model_path": null
+}
+```
+
+- `camera_id`: default webcam index (the `--camera` flag overrides it).
+- `debounce_frames`: consecutive frames a gesture must be held before it fires (default `3`).
+- `cooldown_seconds`: minimum pause between commands in seconds (default `0.5`).
+- `swipe_threshold`: normalized (0-1) palm movement that counts as a swipe (default `0.12`).
+- `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 
 ### Health check
 
@@ -257,6 +281,7 @@ To customize:
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
    | `voice`            | Listening timeout, phrase time limit (seconds), `energy_threshold`, plus the **noise gate** and **confidence threshold** (see below) |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
+   | `gesture`          | Gesture control: `camera_id`, `debounce_frames`, `cooldown_seconds`, `swipe_threshold`, and `model_path` (see Gesture Control) |
    | `player`           | Default skip seconds and volume step                                     |
    | `push_to_talk`     | Push-to-talk: `enabled` and the `key` to hold                             |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
@@ -594,6 +619,7 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`ModuleNotFoundError: No module named 'keyboard'`** → Reactivate the virtual environment (`.venv\Scripts\activate`) and run `pip install -r requirements.txt`, or install it globally. `keyboard` is optional; HTTP control still works without it.
 - **`pyaudio not found`** → Install the wheel that matches your Python version (e.g. `PyAudio‑0.2.14‑cp311‑cp311‑win_amd64.whl` for Python 3.11 on 64-bit Windows), or use `pipwin install pyaudio`.
 - **`opencv-python`/`mediapipe` not installed (gesture mode exits with an error)** → Install them: `pip install opencv-python mediapipe numpy`. Or fall back to voice with `--mode voice`. If you hit a `protobuf` conflict, install the exact versions from `requirements.txt`.
+- **MediaPipe 1.x errors about `solutions`** → MediaPipe 1.x removed the legacy `mp.solutions` API; this app automatically switches to the Tasks API. If you still see initialization errors, make sure the hand-landmarker model can be downloaded (the app caches it in `~/.cache/mediapipe/hand_landmarker.task`), or point `gesture.model_path` / `MEDIAPIPE_HAND_MODEL` at a pre-downloaded `hand_landmarker.task` file.
 - **`Could not open camera 0`** → The webcam is busy (closed by another app) or index 0 isn't your webcam. Try `--camera 1`, `--camera 2`, etc., or in tray mode use the **Next Camera** menu item. With `--show-preview` you can verify the correct camera visually.
 - **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.

@@ -1042,8 +1042,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--camera",
         type=int,
-        default=0,
-        help="Webcam index to use for gesture control (default: 0)",
+        default=None,
+        help="Webcam index to use for gesture control (default: config gesture.camera_id or 0)",
     )
     parser.add_argument(
         "--show-preview",
@@ -1312,8 +1312,22 @@ def main(argv: list[str] | None = None) -> None:
         else None
     )
 
+    gesture_cfg = getattr(cfg, "gesture", None) if use_gesture else None
+
+    camera_id = args.camera
+    if camera_id is None:
+        camera_id = getattr(gesture_cfg, "camera_id", 0) if gesture_cfg else 0
+    camera_id = int(camera_id)
+
     gesture = (
-        GestureController(camera_id=args.camera, show_preview=args.show_preview)
+        GestureController(
+            camera_id=camera_id,
+            show_preview=args.show_preview,
+            debounce_frames=getattr(gesture_cfg, "debounce_frames", 3) if gesture_cfg else 3,
+            cooldown_seconds=getattr(gesture_cfg, "cooldown_seconds", 0.5) if gesture_cfg else 0.5,
+            model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
+            swipe_threshold=getattr(gesture_cfg, "swipe_threshold", None) if gesture_cfg else None,
+        )
         if use_gesture
         else None
     )
@@ -1367,17 +1381,17 @@ def main(argv: list[str] | None = None) -> None:
     }
 
     if mode == "gesture":
-        startup = f"Starting gesture-controlled media player (camera={args.camera}, player={args.player})"
-        hint = f"camera={args.camera}"
+        startup = f"Starting gesture-controlled media player (camera={camera_id}, player={args.player})"
+        hint = f"camera={camera_id}"
     elif mode == "voice":
         startup = f"Starting voice-controlled media player (player={args.player}, recognizer={recognizer_type})"
         hint = f"recognizer={recognizer_type}"
     else:
         startup = (
             f"Starting voice + gesture-controlled media player "
-            f"(camera={args.camera}, player={args.player}, recognizer={recognizer_type})"
+            f"(camera={camera_id}, player={args.player}, recognizer={recognizer_type})"
         )
-        hint = f"camera={args.camera}, recognizer={recognizer_type}"
+        hint = f"camera={camera_id}, recognizer={recognizer_type}"
     log.info("%s", startup)
 
     if args.tray and (not HAS_TRAY or not tray._tray_available()):

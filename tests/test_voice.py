@@ -1701,6 +1701,32 @@ class TestGestureSwipe(unittest.TestCase):
         self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
 
 
+class TestGestureSetup(unittest.TestCase):
+    def test_degrades_cleanly_without_libraries(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertFalse(controller.available)
+        self.assertIsNotNone(controller.error)
+        self.assertIn("not installed", controller.error)
+
+    def test_error_mentions_both_when_everything_missing(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertIn("opencv-python", controller.error)
+        self.assertIn("mediapipe", controller.error)
+
+    def test_detect_returns_none_when_unavailable(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertIsNone(controller.detect_gesture())
+
+    def test_default_model_path_under_home(self):
+        self.assertTrue(gesture.DEFAULT_MODEL_PATH.is_absolute())
+
+    def test_backend_availability_is_boolean(self):
+        self.assertIsInstance(gesture.gesture_backend_available(), bool)
+
+
 class TestGestureActions(unittest.TestCase):
     def _controller(self):
         return _RecordingController()
