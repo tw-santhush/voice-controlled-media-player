@@ -170,6 +170,8 @@ class VoiceListener:
         noise_gate_enabled=None,
         noise_gate_threshold=None,
         confidence_threshold=None,
+        push_to_talk_enabled=None,
+        push_to_talk_key=None,
     ):
         if recognizer is None:
             _require_speech_recognition()
@@ -211,6 +213,19 @@ class VoiceListener:
             if confidence_threshold is not None
             else getattr(cfg.voice, "confidence_threshold", 0.5)
         )
+        ptt = getattr(cfg, "push_to_talk", None)
+        self.push_to_talk_enabled = (
+            push_to_talk_enabled
+            if push_to_talk_enabled is not None
+            else bool(getattr(ptt, "enabled", False))
+        )
+        self.push_to_talk_key = (
+            push_to_talk_key
+            if push_to_talk_key is not None
+            else getattr(ptt, "key", "ctrl")
+        )
+        self.cooldown_until = 0.0
+        self._paused = False
         recognizer.energy_threshold = self.energy_threshold
         recognizer.dynamic_energy_threshold = self.dynamic_energy_threshold
         self._model = None
@@ -409,8 +424,19 @@ class VoiceListener:
             logger.warning("Could not query microphone info: %s", exc)
             return None
 
-    def listen_loop(self, callback, timeout=None) -> None:
-        """Start continuous listening in a background thread."""
+    def listen_loop(self, callback, stop_event=None, timeout=None) -> None:
+        """Start continuous listening in a background thread.
+
+        Args:
+            callback: called with each recognized text string.
+            stop_event: threading.Event that stops the loop when set. If None,
+                the listener's own internal stop event is used.
+            timeout: the per-listening-attempt timeout (None = the configured value).
+        The loop applies the noise gate (within ``listen_once``), confidence
+        filtering, the TTS cooldown, and push-to-talk gating internally.
+        """
+        if stop_event is not None:
+            self._stop_event = stop_event
         self._stop_event.clear()
         timeout = self.timeout if timeout is None else timeout
         self._thread = threading.Thread(
@@ -423,9 +449,56 @@ class VoiceListener:
 
     def _run_loop(self, callback, timeout) -> None:
         while not self._stop_event.is_set():
+            if self._paused or not self._should_listen():
+                self._stop_event.wait(0.25)
+                continue
             text = self.listen_once(timeout=timeout)
             if text:
                 callback(text)
+
+    def pause(self) -> None:
+        """Pause listening without closing the microphone or the loop."""
+        self._paused = True
+
+    def resume(self) -> None:
+        """Resume listening after pause()."""
+        self._paused = False
+
+    def set_cooldown(self, seconds: float) -> None:
+        """Ignore incoming audio for `seconds` (e.g. while TTS is speaking)."""
+        self.cooldown_until = time.time() + max(0.0, seconds or 0.0)
+
+    def _in_cooldown(self) -> bool:
+        return time.time() < self.cooldown_until
+
+    def _should_listen(self) -> bool:
+        """Return False when a listen attempt should be skipped.
+
+        Applies the TTS cooldown and push-to-talk gate before each attempt.
+        The noise gate and confidence filtering are applied per-attempt inside
+        ``listen_once``.
+        """
+        if self._in_cooldown():
+            logger.debug("Ignoring audio: TTS cooldown active")
+            return False
+        if self.push_to_talk_enabled:
+            try:
+                import keyboard as _keyboard
+            except ImportError:
+                logger.warning(
+                    "push_to_talk is enabled but the keyboard module is missing; ignoring PTT"
+                )
+                return True
+            try:
+                if not _keyboard.is_pressed(self.push_to_talk_key):
+                    logger.debug(
+                        "Ignoring audio: push-to-talk key %r not held", self.push_to_talk_key
+                    )
+                    return False
+            except Exception:
+                logger.debug("Could not read push-to-talk key state", exc_info=True)
+                return False
+        return True
 
     def wait_stop(self, timeout=0.5) -> bool:
         """Block until stop() is called or the timeout elapses."""

@@ -4,6 +4,7 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -181,6 +182,63 @@ class TestVoiceListener(unittest.TestCase):
         listener = StoppingListener(recognizer=FakeRecognizer("play"), source=FakeMicSource())
         listener._run_loop(calls.append, 1)
         self.assertEqual(calls, ["volume down", "volume down"])
+
+    def test_pause_blocks_listening_and_resume_restores(self):
+        class TrackListener(VoiceListener):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.count = 0
+
+            def listen_once(self, timeout=None):
+                self.count += 1
+                self.stop()
+                return None
+
+        listener = TrackListener(recognizer=FakeRecognizer("play"), source=FakeMicSource())
+        listener.pause()
+        thread = threading.Thread(target=listener._run_loop, args=(lambda text: None, 1), daemon=True)
+        thread.start()
+        time.sleep(0.2)
+        listener.stop()
+        thread.join(timeout=2)
+        self.assertEqual(listener.count, 0)
+        listener.resume()
+        listener._stop_event.clear()
+        listener._run_loop(lambda text: None, 1)
+        self.assertEqual(listener.count, 1)
+
+    def test_set_cooldown_gates_listening(self):
+        listener = VoiceListener(recognizer=FakeRecognizer("play"), source=FakeMicSource())
+        listener.set_cooldown(60)
+        self.assertTrue(listener._in_cooldown())
+        self.assertFalse(listener._should_listen())
+        listener.set_cooldown(0)
+        self.assertFalse(listener._in_cooldown())
+        self.assertTrue(listener._should_listen())
+
+    def test_push_to_talk_blocks_when_key_not_held(self):
+        fake_kb = types.ModuleType("keyboard")
+        fake_kb.is_pressed = MagicMock(return_value=False)
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("play"),
+            source=FakeMicSource(),
+            push_to_talk_enabled=True,
+            push_to_talk_key="ctrl",
+        )
+        with patch.dict(sys.modules, {"keyboard": fake_kb}):
+            self.assertFalse(listener._should_listen())
+
+    def test_push_to_talk_allows_when_key_held(self):
+        fake_kb = types.ModuleType("keyboard")
+        fake_kb.is_pressed = MagicMock(return_value=True)
+        listener = VoiceListener(
+            recognizer=FakeRecognizer("play"),
+            source=FakeMicSource(),
+            push_to_talk_enabled=True,
+            push_to_talk_key="ctrl",
+        )
+        with patch.dict(sys.modules, {"keyboard": fake_kb}):
+            self.assertTrue(listener._should_listen())
 
     def test_energy_threshold_applied_to_recognizer(self):
         cfg = SimpleNamespace(

@@ -372,6 +372,21 @@ def _in_tts_cooldown(state) -> bool:
     return time.time() < until
 
 
+def _sync_listener_cooldown(listener, state) -> None:
+    """Push the state-tracked TTS cooldown into the listener, if it supports it.
+
+    The listener's internal ``_should_listen`` gate consults its own
+    ``cooldown_until``; mirror the shared state value so push-to-talk and the
+    TTS cooldown both work inside ``listen_loop``.
+    """
+    setter = getattr(listener, "set_cooldown", None)
+    if callable(setter):
+        try:
+            setter(state.get("tts_cooldown_until", 0.0) - time.time())
+        except Exception:
+            pass
+
+
 def _listen_gate(state, tts_cfg, ptt_cfg, log):
     """Return a gate callable for the listener loop: None blocks listening.
 
@@ -419,15 +434,19 @@ def run_continuous(
 ) -> None:
     """Run the listen loop until the listener is stopped. Used by normal and tray modes."""
     porcupine = getattr(wake_cfg, "porcupine", None)
+    if ptt_cfg is not None:
+        listener.push_to_talk_enabled = bool(getattr(ptt_cfg, "enabled", False))
+        listener.push_to_talk_key = getattr(ptt_cfg, "key", "ctrl")
+    _sync_listener_cooldown(listener, state)
     if porcupine is not None:
         _run_continuous_porcupine(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg)
         return
 
-    gate = _listen_gate(state, tts_cfg, ptt_cfg, log)
-    listener.listen_loop(
-        lambda text: process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state),
-        gate=gate,
-    )
+    def on_text(text) -> None:
+        process_recognized(listener, controller, text, log, tts_cfg, wake_cfg, state)
+        _sync_listener_cooldown(listener, state)
+
+    listener.listen_loop(on_text, stop_event=state.get("stop_event"))
     while listener.running:
         listener.wait_stop(timeout=1)
 
