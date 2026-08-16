@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import config
+import gesture
 import main
 import requests
 import speech_recognition as sr
@@ -1557,6 +1558,221 @@ class TestAlwaysActiveListenCommands(unittest.TestCase):
         self.assertEqual(config.match_command("enable"), "listen_on")
         self.assertEqual(config.match_command("disable"), "listen_off")
         self.assertEqual(config.match_command("go silent"), "listen_off")
+
+
+class _Landmark:
+    __slots__ = ("x", "y")
+
+    def __init__(self, x=0.0, y=0.0):
+        self.x = x
+        self.y = y
+
+
+def _hand(open_fingers=(True, True, True, True, True)):
+    """Build a 21-keypoint hand landmark list.
+
+    open_fingers = (thumb, index, middle, ring, pinky). Tips point up (smaller
+    y) when open and curl down near the PIP when closed. The thumb extends out
+    to the side when open.
+    """
+    lm = [_Landmark(0.5, 0.2) for _ in range(21)]
+    lm[0] = _Landmark(0.5, 0.9)  # wrist
+    lm[1] = _Landmark(0.36, 0.75)  # thumb CMC
+    lm[2] = _Landmark(0.34, 0.6)  # thumb MCP
+    lm[3] = _Landmark(0.36, 0.46)  # thumb IP
+    lm[4] = _Landmark(0.30, 0.30) if open_fingers[0] else _Landmark(0.36, 0.48)
+    lm[5] = _Landmark(0.44, 0.55)  # index MCP
+    lm[6] = _Landmark(0.46, 0.42)  # index PIP
+    lm[8] = _Landmark(0.47, 0.22) if open_fingers[1] else _Landmark(0.47, 0.50)
+    lm[7] = _Landmark(0.50, 0.55)  # middle MCP
+    lm[9] = _Landmark(0.50, 0.55)  # palm (middle MCP)
+    lm[10] = _Landmark(0.51, 0.42)  # middle PIP
+    lm[11] = _Landmark(0.51, 0.28)
+    lm[12] = _Landmark(0.52, 0.22) if open_fingers[2] else _Landmark(0.52, 0.50)
+    lm[13] = _Landmark(0.56, 0.55)  # ring MCP
+    lm[14] = _Landmark(0.57, 0.44)  # ring PIP
+    lm[15] = _Landmark(0.57, 0.30)
+    lm[16] = _Landmark(0.58, 0.24) if open_fingers[3] else _Landmark(0.58, 0.52)
+    lm[17] = _Landmark(0.62, 0.55)  # pinky MCP
+    lm[18] = _Landmark(0.63, 0.46)  # pinky PIP
+    lm[19] = _Landmark(0.63, 0.32)
+    lm[20] = _Landmark(0.64, 0.26) if open_fingers[4] else _Landmark(0.64, 0.54)
+    return lm
+
+
+class TestGestureRecognition(unittest.TestCase):
+    def test_open_hand_counts_five_fingers(self):
+        lm = _hand((True, True, True, True, True))
+        self.assertEqual(gesture.count_extended_fingers(lm), [True, True, True, True, True])
+
+    def test_fist_counts_no_fingers(self):
+        lm = _hand((False, False, False, False, False))
+        self.assertEqual(gesture.count_extended_fingers(lm), [False, False, False, False, False])
+
+    def test_peace_only_index_and_middle(self):
+        lm = _hand((False, True, True, False, False))
+        self.assertEqual(gesture.count_extended_fingers(lm), [False, True, True, False, False])
+
+    def test_classify_open_hand_play_pause(self):
+        self.assertEqual(gesture.classify_hand(_hand((True, True, True, True, True))), "play_pause")
+
+    def test_classify_fist_stop(self):
+        self.assertEqual(gesture.classify_hand(_hand((False, False, False, False, False))), "stop")
+
+    def test_classify_peace_mute(self):
+        self.assertEqual(gesture.classify_hand(_hand((False, True, True, False, False))), "toggle_mute")
+
+    def test_classify_index_only_fullscreen(self):
+        self.assertEqual(gesture.classify_hand(_hand((False, True, False, False, False))), "toggle_fullscreen")
+
+    def test_classify_thumbs_up_volume_up(self):
+        lm = _hand((True, False, False, False, False))
+        lm[4] = _Landmark(0.30, 0.30)  # thumb tip above the wrist (0.9)
+        self.assertEqual(gesture.classify_hand(lm), "volume_up")
+
+    def test_classify_thumbs_down_volume_down(self):
+        lm = _hand((True, False, False, False, False))
+        lm[0] = _Landmark(0.5, 0.5)  # raise the wrist so the thumb is below it
+        lm[4] = _Landmark(0.30, 0.75)
+        self.assertEqual(gesture.classify_hand(lm), "volume_down")
+
+
+class TestGestureDebouncer(unittest.TestCase):
+    def test_requires_consecutive_frames(self):
+        debouncer = gesture.Debouncer(frames=3, cooldown=10)
+        self.assertIsNone(debouncer.feed("stop"))
+        self.assertIsNone(debouncer.feed("stop"))
+        self.assertEqual(debouncer.feed("stop"), "stop")
+
+    def test_candidate_change_resets_count(self):
+        debouncer = gesture.Debouncer(frames=3, cooldown=10)
+        debouncer.feed("stop")
+        self.assertIsNone(debouncer.feed("play"))
+        self.assertIsNone(debouncer.feed("play"))
+        self.assertEqual(debouncer.feed("play"), "play")
+
+    def test_same_action_requires_release(self):
+        debouncer = gesture.Debouncer(frames=1, cooldown=0)
+        self.assertEqual(debouncer.feed("stop"), "stop")
+        self.assertIsNone(debouncer.feed("stop"))
+        debouncer.feed(None)
+        self.assertEqual(debouncer.feed("stop"), "stop")
+
+    def test_cooldown_blocks_other_actions(self):
+        now = [100.0]
+        debouncer = gesture.Debouncer(frames=1, cooldown=5, now_fn=lambda: now[0])
+        self.assertEqual(debouncer.feed("stop"), "stop")
+        debouncer.feed(None)
+        self.assertIsNone(debouncer.feed("play"))
+        now[0] += 6
+        self.assertEqual(debouncer.feed("play"), "play")
+
+
+class TestGestureSwipe(unittest.TestCase):
+    def test_swipe_right_skips_forward(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.7, 0.5), "skip_forward")
+
+    def test_swipe_left_skips_backward(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.2, 0.5), "skip_backward")
+
+    def test_swipe_up_volume_up_big(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.5, 0.2), "volume_up_big")
+
+    def test_swipe_down_volume_down_big(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.5, 0.8), "volume_down_big")
+
+    def test_same_direction_does_not_repeat(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker.feed(100.0, 0.5, 0.5)
+        tracker.feed(100.1, 0.7, 0.5)
+        self.assertIsNone(tracker.feed(100.2, 0.9, 0.5))
+
+    def test_slow_motion_not_a_swipe(self):
+        tracker = gesture.SwipeTracker(window=0.5, threshold=0.3)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
+
+
+class TestGestureActions(unittest.TestCase):
+    def _controller(self):
+        return _RecordingController()
+
+    def _state(self):
+        return {"listening": True, "indicators": False}
+
+    def test_play_pause_toggles(self):
+        controller = self._controller()
+        state = self._state()
+        tts_cfg = SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True)
+        main.handle_gesture_action("play_pause", controller, FAKE_LOG, tts_cfg, state)
+        self.assertEqual(controller.calls, ["play"])
+        main.handle_gesture_action("play_pause", controller, FAKE_LOG, tts_cfg, state)
+        self.assertEqual(controller.calls, ["play", "pause"])
+
+    def test_stop_action(self):
+        controller = self._controller()
+        main.handle_gesture_action("stop", controller, FAKE_LOG, tts_cfg_disabled(), self._state())
+        self.assertEqual(controller.calls, ["stop"])
+
+    def test_volume_up_big_steps_ten(self):
+        controller = _RecordingController()
+        main.handle_gesture_action("volume_up_big", controller, FAKE_LOG, tts_cfg_disabled(), self._state())
+        self.assertEqual(controller.calls, [("volume_up", 10)])
+
+    def test_paused_state_ignores_gesture(self):
+        controller = self._controller()
+        state = {"listening": False}
+        main.handle_gesture_action("stop", controller, FAKE_LOG, tts_cfg_disabled(), state)
+        self.assertEqual(controller.calls, [])
+
+    def test_unknown_action_ignored(self):
+        controller = self._controller()
+        main.handle_gesture_action("wiggle", controller, FAKE_LOG, tts_cfg_disabled(), self._state())
+        self.assertEqual(controller.calls, [])
+
+
+def tts_cfg_disabled():
+    return SimpleNamespace(enabled=False, voice_id=None, engine="auto", fallback_enabled=True, cooldown_seconds=0)
+
+
+class _RecordingController:
+    def __init__(self):
+        self.calls = []
+
+    def play(self):
+        self.calls.append("play")
+
+    def pause(self):
+        self.calls.append("pause")
+
+    def stop(self):
+        self.calls.append("stop")
+
+    def skip_forward(self, seconds=None):
+        self.calls.append(("skip_forward", seconds))
+
+    def skip_backward(self, seconds=None):
+        self.calls.append(("skip_backward", seconds))
+
+    def volume_up(self, step=None):
+        self.calls.append(("volume_up", step))
+
+    def volume_down(self, step=None):
+        self.calls.append(("volume_down", step))
+
+    def toggle_mute(self):
+        self.calls.append("toggle_mute")
+
+    def toggle_fullscreen(self):
+        self.calls.append("toggle_fullscreen")
 
 
 class TestTrayIconStates(unittest.TestCase):

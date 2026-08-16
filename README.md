@@ -1,13 +1,14 @@
 # Voice-Controlled Media Player
 
-A Python project that controls VLC and MPC-HC (Media Player Classic - Home Cinema) using voice commands.
+A Python project that controls VLC and MPC-HC (Media Player Classic - Home Cinema) using **webcam hand
+gestures** by default, with voice control available (and combinable) via `--mode`.
 
 Control works over each player's HTTP web interface, with keyboard shortcut simulation as a fallback when HTTP is unavailable.
 
 ## Prerequisites
 
 - Python 3.9+
-- A microphone
+- A webcam (for gesture control, the default mode) and/or a microphone (for voice control)
 - VLC and/or MPC-HC installed, each with its web interface enabled (see Troubleshooting)
 
 ## Virtual Environment Setup
@@ -25,8 +26,11 @@ python -m venv .venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the app
+# Run the app (gesture control, the default; requires a webcam)
 python src/main.py --player auto --continuous
+
+# Or run voice control instead
+python src/main.py --mode voice --player auto --continuous
 ```
 
 On PowerShell, activation is `.\.venv\Scripts\Activate.ps1`.
@@ -53,7 +57,14 @@ pip install path/to/PyAudio-*.whl
 ## Run
 
 ```powershell
+# Gesture control (default)
 python src/main.py --player auto --continuous
+
+# Voice control
+python src/main.py --mode voice --player auto --continuous
+
+# Both at once (gesture runs in a background thread alongside voice)
+python src/main.py --mode both --player auto --continuous
 ```
 
 ### Command-line flags
@@ -61,7 +72,10 @@ python src/main.py --player auto --continuous
 | Flag           | Description                                                     |
 | -------------- | --------------------------------------------------------------- |
 | `--player`     | `vlc`, `mpc`, or `auto` (default: `auto`). Auto detects the running player. |
-| `--continuous` | Run continuously, listening for voice commands (default: `True`). |
+| `--mode`       | Input mode: `gesture` (webcam, default), `voice`, or `both`.    |
+| `--camera`     | Webcam index to use for gesture control (default: `0`).         |
+| `--show-preview` | Show a live webcam preview window with hand landmarks and the detected gesture (press `q` to exit). |
+| `--continuous` | Run continuously, listening for commands (default: `True`). |
 | `--single`     | Listen for a single command and exit (useful for testing).      |
 | `--config`     | Path to a custom JSON config file (default: `config.json`).     |
 | `--tts`        | Force-enable text-to-speech feedback (overrides config).        |
@@ -86,6 +100,42 @@ python src/main.py --player auto --continuous
 | `--install-startup` | Windows only: create a Startup-folder shortcut that launches the app with the tray icon at logon, then exit. |
 | `--uninstall-startup` | Windows only: remove the Startup-folder shortcut created by `--install-startup`, then exit. |
 | `--check-deps` | Print a dependency status report and exit (no microphone needed). |
+
+> Voice-only flags (`--single`, `--recognizer`, `--mic-index`, `--no-wake`, `--wake-debug`,
+> `--push-to-talk`, `--record-test`, `--energy-test`, `--train-wake`) require `--mode voice` or `--mode both`.
+
+### Gesture Control
+
+Webcam hand gestures are the default input. Uses OpenCV + MediaPipe (offline, free). Install the optional extras:
+
+```bash
+pip install opencv-python mediapipe numpy
+```
+
+The gesture-to-action mapping:
+
+| Gesture            | Action               | Notes                          |
+| ------------------ | -------------------- | ------------------------------ |
+| Open hand          | Play / Pause toggle  | Toggles between play and pause |
+| Closed fist        | Stop                 |                                |
+| Swipe left         | Skip backward        |                                |
+| Swipe right        | Skip forward         |                                |
+| Thumbs up          | Volume up (+5)       |                                |
+| Thumbs down        | Volume down (-5)     |                                |
+| Swipe up           | Volume up (+10)      |                                |
+| Swipe down         | Volume down (-10)    |                                |
+| Peace sign         | Mute / unmute        | Index + middle fingers         |
+| Index finger up    | Toggle fullscreen    |                                |
+
+A gesture must be held for ~3 consecutive frames to fire, and commands are rate-limited (~0.5 s) so a quick
+motion can't double-trigger. Hold your hand up, make the shape, and move it back out of view between commands.
+
+- `--camera` selects which webcam to read (default `0`). The tray menu also has a **Next Camera** item when running
+  in gesture tray mode.
+- `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit.
+- If the gesture dependencies or the camera are unavailable, the app prints a clear error and exits; use
+  `--mode voice` to fall back to voice control, or `--mode both` to run both inputs at once.
+- For quick tests, `--mode gesture --single` waits for one gesture, fires it, and exits.
 
 ### Health check
 
@@ -112,14 +162,17 @@ Then launch it in tray mode:
 python src/main.py --tray
 ```
 
-- A microphone icon appears in the tray: **green** while it is actively listening, **yellow** while the TTS
-  response is still being spoken (the cooldown window), and **red** while paused.
-  Listening starts **on** by default — you do not have to enable it after starting the app.
+- In the default gesture mode a **camera** icon appears in the tray; in voice mode it is a **microphone** icon.
+  Either way: **green** while it is actively listening, **yellow** while the TTS response is still being spoken
+  (the cooldown window), and **red** while paused. Listening starts **on** by default — you do not have to enable
+  it after starting the app.
 - Right-click for the menu:
-  - **Start Listening/Stop Listening** — toggle voice recognition without closing the app (same as the
-    `listen_on`/`listen_off` voice commands). The label shows **Stop Listening** while listening is on and
+  - **Start Listening/Stop Listening** — toggle detection without closing the app (same as the
+    `listen_on`/`listen_off` commands). The label shows **Stop Listening** while listening is on and
     **Start Listening** while it is paused.
   - **Show Status** — pop-up with whether it is listening and which player it found.
+  - **Next Camera** — switch to the next webcam (gesture mode only).
+  - **Toggle Webcam Preview** — show/hide the live gesture preview window (gesture mode only).
   - **Exit** — shuts the app down.
 - The console window stays open for logs. If `pystray` is not installed, `--tray` falls back to terminal mode.
 
@@ -529,8 +582,8 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 
 ```
 .
-+-- src/                    # Source code (config, voice listener, player controllers, tray icon, main)
-+-- tests/                  # Unit tests (mocked microphone)
++-- src/                    # Source code (config, gesture/voice listeners, player controllers, tray icon, main)
++-- tests/                  # Unit tests (mocked microphone and gestures)
 +-- config.example.json     # Committed template; copy to config.json and edit
 +-- requirements.txt
 +-- README.md
@@ -540,6 +593,9 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 
 - **`ModuleNotFoundError: No module named 'keyboard'`** → Reactivate the virtual environment (`.venv\Scripts\activate`) and run `pip install -r requirements.txt`, or install it globally. `keyboard` is optional; HTTP control still works without it.
 - **`pyaudio not found`** → Install the wheel that matches your Python version (e.g. `PyAudio‑0.2.14‑cp311‑cp311‑win_amd64.whl` for Python 3.11 on 64-bit Windows), or use `pipwin install pyaudio`.
+- **`opencv-python`/`mediapipe` not installed (gesture mode exits with an error)** → Install them: `pip install opencv-python mediapipe numpy`. Or fall back to voice with `--mode voice`. If you hit a `protobuf` conflict, install the exact versions from `requirements.txt`.
+- **`Could not open camera 0`** → The webcam is busy (closed by another app) or index 0 isn't your webcam. Try `--camera 1`, `--camera 2`, etc., or in tray mode use the **Next Camera** menu item. With `--show-preview` you can verify the correct camera visually.
+- **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.

@@ -53,6 +53,25 @@ def _draw_mic(color: tuple[int, int, int]):
     return img
 
 
+def _draw_camera(color: tuple[int, int, int]):
+    """Draw a webcam on a `ICON_SIZE`x`ICON_SIZE` background using Pillow."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (ICON_SIZE, ICON_SIZE), color)
+    draw = ImageDraw.Draw(img)
+
+    # Camera body.
+    draw.rounded_rectangle([8, 18, 56, 46], radius=6, fill=WHITE)
+    # Lens.
+    draw.ellipse([22, 24, 42, 40], fill=color)
+    draw.ellipse([27, 29, 37, 35], fill=WHITE)
+    # Viewfinder bump on top.
+    draw.rounded_rectangle([22, 10, 34, 18], radius=2, fill=WHITE)
+    # Recording LED.
+    draw.ellipse([46, 12, 52, 18], fill=RED)
+    return img
+
+
 def _show_popup(text: str) -> None:
     """Print the text and, on Windows, also show it in a small popup.
 
@@ -87,16 +106,19 @@ def _current_color(state) -> tuple[int, int, int]:
     return GREEN if state.get("listening", True) else RED
 
 
-def create_tray_icon(listener, controller, state=None, verbose: bool = False):
+def create_tray_icon(listener, controller, state=None, verbose: bool = False, mode: str = "voice"):
     """Create a pystray icon controlling the app, or None if unavailable.
 
     Args:
-        listener: object with running/stop attributes (the VoiceListener).
+        listener: object with pause/resume/running/stop attributes (the
+            VoiceListener or GestureController).
         controller: player controller used only for status reporting.
         state: shared dict with a "listening" boolean. If omitted, a private
             one is used (tray-only toggling has no effect on the app).
         verbose: when True, print "Listener: ON/OFF" to the console on toggle
             so the app's state is visible even with console logging at ERROR.
+        mode: "voice" (default) draws a microphone; "gesture" draws a camera
+            and uses gesture-specific menu wording.
     """
     try:
         import pystray
@@ -111,10 +133,15 @@ def create_tray_icon(listener, controller, state=None, verbose: bool = False):
         state = {"listening": True}
     listening = lambda: bool(state.get("listening", True))
 
+    is_gesture = mode == "gesture"
+    draw_icon = _draw_camera if is_gesture else _draw_mic
+    noun = "Detection" if is_gesture else "Listening"
+    verified = "detection" if is_gesture else "voice control"
+
     icon = pystray.Icon("voice-controlled-media-player")
 
     def _refresh_image() -> None:
-        icon.icon = _draw_mic(_current_color(state))
+        icon.icon = draw_icon(_current_color(state))
 
     def _auto_refresh() -> None:
         """Periodically re-draw the icon so the yellow cooldown state updates."""
@@ -133,16 +160,27 @@ def create_tray_icon(listener, controller, state=None, verbose: bool = False):
     refresh_thread = threading.Thread(target=_auto_refresh, name="tray-refresh", daemon=True)
     refresh_thread.start()
 
+    def _apply_listening(enabled: bool) -> None:
+        """Mirror the state flag onto the listener's pause/resume controls."""
+        pause = getattr(listener, "pause", None)
+        resume = getattr(listener, "resume", None)
+        if callable(pause) and callable(resume):
+            if enabled:
+                resume()
+            else:
+                pause()
+
     def _toggle_listening(icon_item=None, item=None) -> None:
         state["listening"] = not listening()
-        logger.info("Tray: listening toggled to %s", "on" if listening() else "off")
+        _apply_listening(listening())
+        logger.info("Tray: %s toggled to %s", noun, "on" if listening() else "off")
         if verbose:
             _print_listener_state(state)
-        _show_popup(f"Voice control {'resumed' if listening() else 'paused'}")
+        _show_popup(f"{verified.capitalize()} {'resumed' if listening() else 'paused'}")
         _refresh_image()
 
     def _show_status(icon_item=None, item=None) -> None:
-        lines = [f"Listening: {'on' if listening() else 'off/paused'}"]
+        lines = [f"{noun}: {'on' if listening() else 'off/paused'}"]
         if hasattr(listener, "running"):
             lines.append(f"Listener running: {listener.running}")
         current = getattr(controller, "current", None)
@@ -160,7 +198,7 @@ def create_tray_icon(listener, controller, state=None, verbose: bool = False):
     _refresh_image()
     icon.menu = pystray.Menu(
         pystray.MenuItem(
-            lambda text: "Stop Listening" if listening() else "Start Listening",
+            lambda text: f"Stop {noun}" if listening() else f"Start {noun}",
             lambda icon_item, item: _toggle_listening(icon_item, item),
         ),
         pystray.MenuItem("Show Status", lambda icon_item, item: _show_status(icon_item, item)),

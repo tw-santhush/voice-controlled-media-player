@@ -61,6 +61,7 @@ import config
 import config_loader
 import player_control
 import tts
+from gesture import GestureController
 from voice_listener import VoiceListener, _peak, list_microphones
 from wake import build_porcupine
 
@@ -145,7 +146,7 @@ def print_check_deps() -> None:
         print(line)
 
 
-def check_required_dependencies(log: logging.Logger) -> None:
+def check_required_dependencies(log: logging.Logger, mode: str = "gesture") -> None:
     def fail(message: str) -> None:
         print(f"ERROR: {message}", file=sys.stderr)
         print(ACTIVATE_HINT, file=sys.stderr)
@@ -153,14 +154,15 @@ def check_required_dependencies(log: logging.Logger) -> None:
 
     if not HAS_REQUESTS:
         fail("requests is not installed. It is required for HTTP control of VLC and MPC-HC.")
-    if not HAS_SPEECH:
-        fail("SpeechRecognition is not installed. It is required for voice control.")
-    if not HAS_PYAUDIO:
-        fail(
-            "pyaudio is not installed. SpeechRecognition needs it for microphone input. "
-            "On Windows, install the wheel that matches your Python version (a cp311 wheel "
-            "is expected for Python 3.11). See README 'Troubleshooting'."
-        )
+    if mode in ("voice", "both"):
+        if not HAS_SPEECH:
+            fail("SpeechRecognition is not installed. It is required for voice control.")
+        if not HAS_PYAUDIO:
+            fail(
+                "pyaudio is not installed. SpeechRecognition needs it for microphone input. "
+                "On Windows, install the wheel that matches your Python version (a cp311 wheel "
+                "is expected for Python 3.11). See README 'Troubleshooting'."
+            )
     if not HAS_KEYBOARD:
         log.warning("keyboard module is missing; falling back to HTTP-only control. Optional install: pip install keyboard")
 
@@ -295,6 +297,88 @@ def handle_command(listener, controller, text: str, log: logging.Logger, tts_cfg
         speak_feedback(tts_cfg, failed=True, state=state)
         return
     speak_feedback(tts_cfg, action, state=state)
+
+
+GESTURE_FEEDBACK = {
+    "play_pause": "play",
+    "stop": "stop",
+    "skip_backward": "skip_backward",
+    "skip_forward": "skip_forward",
+    "volume_up": "volume_up",
+    "volume_down": "volume_down",
+    "volume_up_big": "volume_up",
+    "volume_down_big": "volume_down",
+    "toggle_mute": "mute",
+    "toggle_fullscreen": "fullscreen",
+}
+
+
+def handle_gesture_action(action, controller, log: logging.Logger, tts_cfg, state=None) -> None:
+    """Execute a command from a detected gesture action.
+
+    Mirrors ``handle_command`` for voice: honors the shared "listening" gate so
+    the tray/hotkey pause also stops gesture processing. play_pause toggles
+    between the controller's separate play() and pause() methods using the
+    shared "playing" state flag.
+    """
+    if state is None:
+        state = {"listening": True}
+
+    if not state.get("listening", True):
+        log.info("Detection paused; ignoring gesture: %r", action)
+        return
+
+    indicators = bool(state.get("indicators", False))
+
+    if action == "play_pause":
+        playing = bool(state.get("playing", False))
+        feedback = "pause" if playing else "play"
+        try:
+            if playing:
+                controller.pause()
+            else:
+                controller.play()
+            state["playing"] = not playing
+        except Exception:
+            log.exception("Gesture command play_pause failed")
+            speak_feedback(tts_cfg, failed=True, state=state)
+            return
+        log.info("Gesture action: %s (%s)", "play_pause", feedback)
+        if indicators:
+            _console(f"Gesture: {feedback.title()}")
+        speak_feedback(tts_cfg, feedback, state=state)
+        return
+
+    log.info("Gesture action: %s", action)
+    if indicators:
+        _console(f"Gesture: {action}")
+    try:
+        if action == "stop":
+            controller.stop()
+        elif action == "skip_backward":
+            controller.skip_backward()
+        elif action == "skip_forward":
+            controller.skip_forward()
+        elif action == "volume_up":
+            controller.volume_up()
+        elif action == "volume_down":
+            controller.volume_down()
+        elif action == "volume_up_big":
+            controller.volume_up(step=10)
+        elif action == "volume_down_big":
+            controller.volume_down(step=10)
+        elif action == "toggle_mute":
+            controller.toggle_mute()
+        elif action == "toggle_fullscreen":
+            controller.toggle_fullscreen()
+        else:
+            log.info("No handler for gesture action: %r", action)
+            return
+    except Exception:
+        log.exception("Gesture command %s failed", action)
+        speak_feedback(tts_cfg, failed=True, state=state)
+        return
+    speak_feedback(tts_cfg, GESTURE_FEEDBACK.get(action), state=state)
 
 
 def process_recognized(
@@ -499,6 +583,68 @@ def _run_continuous_porcupine(
             state,
             wake_bypassed=True,
         )
+
+
+def run_continuous_gesture(gesture, controller, log: logging.Logger, tts_cfg, state) -> None:
+    """Run the gesture detection loop until the gesture controller is stopped."""
+    if gesture is None or not gesture.available:
+        log.error("Gesture detection unavailable: %s", getattr(gesture, "error", None))
+        return
+    return gesture.run_loop(lambda action: handle_gesture_action(action, controller, log, tts_cfg, state))
+
+
+def run_once_gesture(gesture, controller, log: logging.Logger, tts_cfg, state) -> None:
+    """Wait for a single gesture, fire it once, and stop."""
+    if gesture is None or not gesture.available:
+        log.error("Gesture detection unavailable: %s", getattr(gesture, "error", None))
+        return
+
+    def on_action(action) -> None:
+        handle_gesture_action(action, controller, log, tts_cfg, state)
+        gesture.stop()
+
+    gesture.run_loop(on_action)
+
+
+def run_continuous_mode(
+    mode: str,
+    listener,
+    gesture,
+    controller,
+    log: logging.Logger,
+    tts_cfg,
+    wake_cfg,
+    state,
+    ptt_cfg=None,
+) -> None:
+    """Dispatch the continuous run loop based on the input mode.
+
+    "both" runs the gesture loop in a background thread while the voice loop
+    blocks on the main thread; stopping either input stops the app.
+    """
+    if mode == "gesture":
+        run_continuous_gesture(gesture, controller, log, tts_cfg, state)
+        return
+    if mode == "voice":
+        run_continuous(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+        return
+
+    if gesture is None or not gesture.available:
+        log.warning("Gesture control unavailable (%s); continuing with voice only", getattr(gesture, "error", None))
+        run_continuous(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+        return
+
+    gesture_thread = threading.Thread(
+        target=run_continuous_gesture,
+        args=(gesture, controller, log, tts_cfg, state),
+        daemon=True,
+    )
+    gesture_thread.start()
+    try:
+        run_continuous(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+    finally:
+        gesture.stop()
+        gesture_thread.join(timeout=2)
 
 
 def build_wake_cfg(args, cfg, log) -> SimpleNamespace:
@@ -811,38 +957,56 @@ def run_test_tray(log: logging.Logger) -> None:
         log.info("Test-tray shutdown complete")
 
 
-def run_tray(listener, controller, log: logging.Logger, tts_cfg, wake_cfg, state, hotkey=None, ptt_cfg=None) -> None:
+def run_tray(
+    listener,
+    gesture,
+    controller,
+    log: logging.Logger,
+    tts_cfg,
+    wake_cfg,
+    state,
+    hotkey=None,
+    ptt_cfg=None,
+    mode: str = "voice",
+) -> None:
     """Run the listen loop in a background thread with the tray icon on the main thread."""
     from tray import create_tray_icon, _draw_mic, _show_popup
 
     show_indicators = bool(state.get("indicators", False))
 
-    icon = create_tray_icon(listener, controller, state=state, verbose=show_indicators)
+    if mode in ("gesture", "both") and gesture is not None and gesture.available:
+        from gesture_tray import create_gesture_tray_icon
+
+        icon = create_gesture_tray_icon(gesture, controller, state=state, verbose=show_indicators)
+    else:
+        icon = create_tray_icon(listener, controller, state=state, verbose=show_indicators, mode=mode)
     if not icon:
         log.warning("Tray is unavailable; falling back to terminal mode")
-        run_continuous(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+        run_continuous_mode(mode, listener, gesture, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
         return
 
     if hotkey:
         _register_hotkey(icon, state, hotkey, log, verbose=show_indicators)
 
     worker = threading.Thread(
-        target=run_continuous,
-        args=(listener, controller, log, tts_cfg, wake_cfg, state),
+        target=run_continuous_mode,
+        args=(mode, listener, gesture, controller, log, tts_cfg, wake_cfg, state),
         kwargs={"ptt_cfg": ptt_cfg},
         daemon=True,
     )
     worker.start()
 
+    icon_name = "camera" if mode in ("gesture", "both") else "microphone"
     log.info(
-        "Tray mode active. Look for the microphone icon in the system tray. "
-        "Exit the app from the tray menu (this console can be closed)."
+        "Tray mode active. Look for the %s icon in the system tray. "
+        "Exit the app from the tray menu (this console can be closed).",
+        icon_name,
     )
     if show_indicators:
         _console(f"Listener: {'ON' if state.get('listening', True) else 'OFF'}")
     if sys.stdout is not None:
         print(
-            "Tray mode active. Right-click the microphone icon in the system tray "
+            f"Tray mode active. Right-click the {icon_name} icon in the system tray "
             "to control the app, then close this window."
         )
 
@@ -851,18 +1015,40 @@ def run_tray(listener, controller, log: logging.Logger, tts_cfg, wake_cfg, state
     except Exception:
         log.exception("Tray icon failed")
     finally:
-        listener.stop()
+        if listener is not None:
+            listener.stop()
+        if gesture is not None:
+            gesture.stop()
         worker.join(timeout=2)
         log.info("Shutdown complete")
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Voice-controlled media player")
+    parser = argparse.ArgumentParser(
+        description="Gesture- or voice-controlled media player (webcam gestures by default)"
+    )
     parser.add_argument(
         "--player",
         choices=["vlc", "mpc", "auto"],
         default="auto",
         help="Which player to control (default: auto)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["voice", "gesture", "both"],
+        default="gesture",
+        help="Input mode: webcam hand gestures (default), voice, or both at once",
+    )
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=0,
+        help="Webcam index to use for gesture control (default: 0)",
+    )
+    parser.add_argument(
+        "--show-preview",
+        action="store_true",
+        help="Show a live webcam preview window during gesture control (press q to exit)",
     )
     parser.add_argument(
         "--continuous",
@@ -1088,26 +1274,63 @@ def main(argv: list[str] | None = None) -> None:
         print("TTS test:", "OK" if ok else "FAILED (see logs for details)")
         return
 
+    mode = args.mode
+    use_voice = mode in ("voice", "both")
+    use_gesture = mode in ("gesture", "both")
+
     if args.single:
         args.continuous = False
 
-    wake_cfg = build_wake_cfg(args, cfg, log)
+    if not use_voice and (args.record_test or args.energy_test or args.train_wake):
+        print(
+            "ERROR: --record-test, --energy-test and --train-wake require voice mode "
+            "(use --mode voice).",
+            file=sys.stderr,
+        )
+        return
+
+    wake_cfg = build_wake_cfg(args, cfg, log) if use_voice else None
 
     if tts_enabled and not HAS_TTS and args.tts_engine in (None, "auto", "pyttsx3"):
         log.warning("tts is enabled in config but pyttsx3 is not installed; install with: pip install pyttsx3")
 
-    check_required_dependencies(log)
+    check_required_dependencies(log, mode=mode)
 
     controller = build_controller(args.player)
     recognizer_type = args.recognizer or getattr(cfg.recognizer, "engine", "auto")
-    listener = VoiceListener(
-        timeout=cfg.voice.timeout_seconds,
-        phrase_time_limit=cfg.voice.phrase_time_limit,
-        recognizer_type=recognizer_type,
-        vosk_model_path=getattr(cfg.recognizer, "vosk_model_path", None),
-        device_index=args.mic_index,
-        energy_threshold=args.set_energy,
+
+    listener = (
+        VoiceListener(
+            timeout=cfg.voice.timeout_seconds,
+            phrase_time_limit=cfg.voice.phrase_time_limit,
+            recognizer_type=recognizer_type,
+            vosk_model_path=getattr(cfg.recognizer, "vosk_model_path", None),
+            device_index=args.mic_index,
+            energy_threshold=args.set_energy,
+        )
+        if use_voice
+        else None
     )
+
+    gesture = (
+        GestureController(camera_id=args.camera, show_preview=args.show_preview)
+        if use_gesture
+        else None
+    )
+    if gesture is not None and not gesture.available:
+        log.error("Gesture control unavailable: %s", gesture.error)
+        print(f"ERROR: Gesture control is unavailable: {gesture.error}", file=sys.stderr)
+        if mode == "gesture":
+            print(
+                "  Install the optional dependencies (pip install -r requirements.txt) or "
+                "check the webcam, or use --mode voice to fall back to voice control.",
+                file=sys.stderr,
+            )
+            return
+        log.warning("Continuing with voice-only input")
+        mode = "voice"
+        use_gesture = False
+        gesture = None
 
     if args.record_test:
         run_record_test(listener)
@@ -1121,7 +1344,7 @@ def main(argv: list[str] | None = None) -> None:
         run_wake_training(listener)
         return
 
-    if args.debug:
+    if args.debug and listener is not None:
         mic_info = listener.get_microphone_info()
         if mic_info:
             print(
@@ -1130,6 +1353,8 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             print("Mic info unavailable")
+    if args.debug and gesture is not None:
+        print(f"Camera: index={gesture.camera_id} available={gesture.available}")
 
     state = {
         "listening": True,
@@ -1138,33 +1363,58 @@ def main(argv: list[str] | None = None) -> None:
         "indicators": bool(args.tray and args.debug),
         "tts_cooldown_until": 0.0,
         "stop_event": threading.Event(),
+        "playing": False,
     }
 
-    log.info(
-        "Starting voice-controlled media player (player=%s, recognizer=%s)",
-        args.player,
-        recognizer_type,
-    )
+    if mode == "gesture":
+        startup = f"Starting gesture-controlled media player (camera={args.camera}, player={args.player})"
+        hint = f"camera={args.camera}"
+    elif mode == "voice":
+        startup = f"Starting voice-controlled media player (player={args.player}, recognizer={recognizer_type})"
+        hint = f"recognizer={recognizer_type}"
+    else:
+        startup = (
+            f"Starting voice + gesture-controlled media player "
+            f"(camera={args.camera}, player={args.player}, recognizer={recognizer_type})"
+        )
+        hint = f"camera={args.camera}, recognizer={recognizer_type}"
+    log.info("%s", startup)
 
     if args.tray and (not HAS_TRAY or not tray._tray_available()):
         log.warning("pystray is not installed; falling back to terminal mode")
         args.tray = False
 
     if not args.tray:
-        print(f"Listening... player={args.player} recognizer={recognizer_type}. Press Ctrl+C to stop.")
+        print(f"{('Gesture control' if mode != 'voice' else 'Listening')}... {hint}, player={args.player}. Press Ctrl+C to stop.")
 
     try:
         if args.tray:
-            run_tray(listener, controller, log, tts_cfg, wake_cfg, state, hotkey=args.hotkey, ptt_cfg=ptt_cfg)
+            run_tray(
+                listener,
+                gesture,
+                controller,
+                log,
+                tts_cfg,
+                wake_cfg,
+                state,
+                hotkey=args.hotkey,
+                ptt_cfg=ptt_cfg,
+                mode=mode,
+            )
         elif args.continuous:
-            run_continuous(listener, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+            run_continuous_mode(mode, listener, gesture, controller, log, tts_cfg, wake_cfg, state, ptt_cfg=ptt_cfg)
+        elif use_gesture:
+            run_once_gesture(gesture, controller, log, tts_cfg, state)
         else:
             run_once(listener, controller, log, tts_cfg, wake_cfg, state)
     except KeyboardInterrupt:
         log.info("Shutdown requested (Ctrl+C)")
     finally:
         state["stop_event"].set()
-        listener.stop()
+        if listener is not None:
+            listener.stop()
+        if gesture is not None:
+            gesture.stop()
         log.info("Shutdown complete")
 
 

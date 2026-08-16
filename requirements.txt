@@ -5,6 +5,11 @@ SpeechRecognition
 # On Windows, install the wheel matching your Python version if pip cannot find one.
 pyaudio
 
+# Gesture recognition (default input method). Free, open-source, offline only.
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+
 # HTTP control of VLC and MPC-HC web interfaces
 requests
 
