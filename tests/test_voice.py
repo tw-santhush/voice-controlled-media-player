@@ -1727,6 +1727,121 @@ class TestGestureSetup(unittest.TestCase):
         self.assertIsInstance(gesture.gesture_backend_available(), bool)
 
 
+class _Frame:
+    size = 4800
+    shape = (480, 640, 3)
+
+
+class _FakeCap:
+    """Reads a fixed list of (ok, frame) tuples; then fails forever."""
+
+    def __init__(self, results, opened=True):
+        self.results = list(results)
+        self.opened = opened
+        self.released = False
+        self.reads = 0
+
+    def isOpened(self):
+        return self.opened
+
+    def read(self):
+        self.reads += 1
+        if self.results:
+            return self.results.pop(0)
+        return False, None
+
+    def release(self):
+        self.released = True
+
+
+def _fake_cv2(factory):
+    cv2 = MagicMock()
+    cv2.CAP_DSHOW = 700
+    cv2.CAP_MSMF = 1400
+    cv2.CAP_V4L2 = 200
+    cv2.CAP_ANY = 0
+    cv2.VideoCapture = MagicMock(side_effect=factory)
+    return cv2
+
+
+class TestGestureCameraOpen(unittest.TestCase):
+    def test_candidates_order_requested_then_defaults(self):
+        self.assertEqual(gesture._camera_candidates(5), [5, 0, 1, -1])
+        self.assertEqual(gesture._camera_candidates(0), [0, 1, -1])
+
+    def test_backends_are_deduplicated(self):
+        seen = gesture._camera_backends()
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_open_camera_falls_back_to_next_backend(self):
+        calls = []
+
+        def factory(index, backend):
+            calls.append((index, backend))
+            return _FakeCap([(True, _Frame())], opened=(backend != 700))
+
+        with patch.object(gesture, "cv2", _fake_cv2(factory)):
+            cap = gesture.open_camera(0)
+        self.assertIsNotNone(cap)
+        self.assertEqual(calls[0], (0, 700))
+        self.assertEqual(len(calls), 2)
+
+    def test_open_camera_accepts_black_frames(self):
+        cap = _FakeCap([(True, _Frame()) for _ in range(3)])
+        with patch.object(gesture, "cv2", _fake_cv2(lambda index, backend: cap)):
+            result = gesture.open_camera(0)
+        self.assertIs(result, cap)
+        self.assertEqual(cap.reads, 1)
+
+    def test_open_camera_returns_none_when_everything_fails(self):
+        caps = []
+
+        def factory(index, backend):
+            cap = _FakeCap([], opened=False)
+            caps.append(cap)
+            return cap
+
+        with patch.object(gesture, "cv2", _fake_cv2(factory)):
+            result = gesture.open_camera(0)
+        self.assertIsNone(result)
+        self.assertTrue(all(c.released for c in caps))
+
+    def test_controller_reopens_after_repeated_failures(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        dead = _FakeCap([])
+        controller._cap = dead
+        controller._detector = MagicMock()
+        controller.available = True
+        good = _FakeCap([(True, _Frame())])
+        with patch.object(gesture, "cv2", _fake_cv2(lambda i, b: good)) as cv2_mock, patch.object(
+            gesture, "open_camera", return_value=good
+        ):
+            for _ in range(controller.max_read_failures):
+                self.assertIsNone(controller.detect_gesture())
+            self.assertIs(controller._cap, good)
+            self.assertEqual(controller._read_failures, 0)
+            self.assertTrue(controller.available)
+
+    def test_controller_does_not_reopen_before_limit(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        dead = _FakeCap([])
+        controller._cap = dead
+        controller._detector = MagicMock()
+        controller.available = True
+        with patch.object(gesture, "open_camera", return_value=dead):
+            for _ in range(controller.max_read_failures - 1):
+                self.assertIsNone(controller.detect_gesture())
+        self.assertIs(controller._cap, dead)
+        self.assertEqual(controller._read_failures, controller.max_read_failures - 1)
+
+    def test_get_preview_frame_returns_none_when_unavailable(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertIsNone(controller.get_preview_frame())
+
+
 class TestGestureActions(unittest.TestCase):
     def _controller(self):
         return _RecordingController()

@@ -59,6 +59,7 @@ except ImportError:
 
 import config
 import config_loader
+import gesture as gesture_mod
 import player_control
 import tts
 from gesture import GestureController
@@ -1023,6 +1024,76 @@ def run_tray(
         log.info("Shutdown complete")
 
 
+def run_raw_preview(camera_id: int | None = None) -> int:
+    """Debug mode: open the webcam and show the unprocessed frames.
+
+    Tries camera index 0 first, then 1 and -1, prints diagnostics when the
+    device is unreadable, and keeps the window open until 'q' is pressed.
+    Returns the process exit code.
+    """
+    cv2 = gesture_mod.cv2
+    if cv2 is None:
+        print("ERROR: opencv-python is not installed (pip install -r requirements.txt).", file=sys.stderr)
+        return 1
+    indices = [camera_id] if camera_id is not None else [0, 1, -1]
+    cap = None
+    for index in indices:
+        if index is None:
+            continue
+        try:
+            candidate = cv2.VideoCapture(index)
+        except Exception as exc:
+            print(f"Camera {index} failed to open: {exc}")
+            continue
+        if not candidate.isOpened():
+            candidate.release()
+            continue
+        try:
+            ok, frame = candidate.read()
+        except Exception:
+            ok = False
+        if not ok or frame is None or frame.size == 0:
+            candidate.release()
+            continue
+        cap = candidate
+        print(f"Using camera index {index}")
+        break
+    if cap is None:
+        print("ERROR: no readable webcam found (tried indexes 0, 1, -1).", file=sys.stderr)
+        return 1
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width and height:
+        print(f"Camera reports input size: {width}x{height}")
+    if height and height <= 240:
+        print(f"WARNING: camera reports a small {width}x{height} frame; the preview will be scaled up 1.5x.")
+        height = int(height * 1.5)
+    print("Press q to quit")
+    window = "Raw Camera Preview (q to quit)"
+    try:
+        while True:
+            try:
+                ok, frame = cap.read()
+            except Exception:
+                ok = False
+            if not ok or frame is None:
+                continue
+            if frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            cv2.imshow(window, frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cap.release()
+        try:
+            cv2.destroyWindow(window)
+        except Exception:
+            pass
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Gesture- or voice-controlled media player (webcam gestures by default)"
@@ -1049,6 +1120,12 @@ def main(argv: list[str] | None = None) -> None:
         "--show-preview",
         action="store_true",
         help="Show a live webcam preview window during gesture control (press q to exit)",
+    )
+    parser.add_argument(
+        "--raw-preview",
+        action="store_true",
+        help="Debug the webcam: open it, show the raw frames, and exit. "
+        "Tries indexes 0, 1 and -1 and prints diagnostics; q closes the window",
     )
     parser.add_argument(
         "--continuous",
@@ -1186,6 +1263,11 @@ def main(argv: list[str] | None = None) -> None:
 
     log = setup_logging(console_level=logging.ERROR if args.tray else logging.INFO)
 
+    if args.raw_preview:
+        if args.show_preview:
+            print("WARNING: --raw-preview already shows the webcam feed; ignoring --show-preview.")
+        sys.exit(run_raw_preview(args.camera))
+
     if args.install_startup or args.uninstall_startup:
         if sys.platform != "win32":
             print("ERROR: --install-startup/--uninstall-startup are only supported on Windows.", file=sys.stderr)
@@ -1277,6 +1359,13 @@ def main(argv: list[str] | None = None) -> None:
     mode = args.mode
     use_voice = mode in ("voice", "both")
     use_gesture = mode in ("gesture", "both")
+
+    if args.show_preview and not use_gesture:
+        print(
+            "WARNING: --show-preview has no effect without gesture control "
+            "(use --mode gesture or --mode both).",
+            file=sys.stderr,
+        )
 
     if args.single:
         args.continuous = False

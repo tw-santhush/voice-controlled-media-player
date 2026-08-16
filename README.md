@@ -75,6 +75,7 @@ python src/main.py --mode both --player auto --continuous
 | `--mode`       | Input mode: `gesture` (webcam, default), `voice`, or `both`.    |
 | `--camera`     | Webcam index to use for gesture control (default: `0`).         |
 | `--show-preview` | Show a live webcam preview window with hand landmarks and the detected gesture (press `q` to exit). |
+| `--raw-preview`  | Debug the webcam: open it, show the unprocessed frames, and exit. Tries indexes 0, 1 and -1, prints diagnostics, and closes on `q`. Useful when the gesture preview looks black or the camera won't open. |
 | `--continuous` | Run continuously, listening for commands (default: `True`). |
 | `--single`     | Listen for a single command and exit (useful for testing).      |
 | `--config`     | Path to a custom JSON config file (default: `config.json`).     |
@@ -136,9 +137,14 @@ The gesture-to-action mapping:
 A gesture must be held for ~3 consecutive frames to fire, and commands are rate-limited (~0.5 s) so a quick
 motion can't double-trigger. Hold your hand up, make the shape, and move it back out of view between commands.
 
-- `--camera` selects which webcam to read (default `0`). The tray menu also has a **Next Camera** item when running
-  in gesture tray mode.
+- `--camera` selects which webcam to read (default: config `gesture.camera_id`, else `0`). The tray menu also has a
+  **Next Camera** item when running in gesture tray mode. If the requested index (or backend) fails, the app
+  automatically falls back to other camera indexes (`0`, then `1`, then `-1`) and to every available video backend
+  (DirectShow first on Windows), so a busy or half-initialized webcam is rarely fatal.
 - `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit.
+- `--raw-preview` skips gesture detection entirely and just shows the raw webcam feed with diagnostics. Use it first
+  when the gesture preview is black or empty: it proves whether the camera itself produces frames. A camera that
+  never starts or goes unreadable mid-run is automatically re-opened.
 - If the gesture dependencies, model, or camera are unavailable, the app prints a clear error and exits; use
   `--mode voice` to fall back to voice control, or `--mode both` to run both inputs at once.
 - For quick tests, `--mode gesture --single` waits for one gesture, fires it, and exits.
@@ -620,7 +626,12 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
 - **`pyaudio not found`** → Install the wheel that matches your Python version (e.g. `PyAudio‑0.2.14‑cp311‑cp311‑win_amd64.whl` for Python 3.11 on 64-bit Windows), or use `pipwin install pyaudio`.
 - **`opencv-python`/`mediapipe` not installed (gesture mode exits with an error)** → Install them: `pip install opencv-python mediapipe numpy`. Or fall back to voice with `--mode voice`. If you hit a `protobuf` conflict, install the exact versions from `requirements.txt`.
 - **MediaPipe 1.x errors about `solutions`** → MediaPipe 1.x removed the legacy `mp.solutions` API; this app automatically switches to the Tasks API. If you still see initialization errors, make sure the hand-landmarker model can be downloaded (the app caches it in `~/.cache/mediapipe/hand_landmarker.task`), or point `gesture.model_path` / `MEDIAPIPE_HAND_MODEL` at a pre-downloaded `hand_landmarker.task` file.
-- **`Could not open camera 0`** → The webcam is busy (closed by another app) or index 0 isn't your webcam. Try `--camera 1`, `--camera 2`, etc., or in tray mode use the **Next Camera** menu item. With `--show-preview` you can verify the correct camera visually.
+- **`Could not open camera 0` / the preview window is black** → The app already retries several camera indexes
+  (`--camera` index, then `0`, `1`, `-1`) and every video backend, plus reads warm-up frames to skip the initial
+  black frames most webcams emit, so a "black preview" is usually the camera still warming up or genuinely dead.
+  Run `python src/main.py --raw-preview` to see the raw feed and diagnostics; press `q` to exit. If the raw preview
+  is black too, the webcam is busy (closed by another app) or index 0 isn't your webcam — try `--camera 1`,
+  `--camera 2`, etc., or in tray mode use the **Next Camera** menu item.
 - **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).

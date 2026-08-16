@@ -95,6 +95,60 @@ def gesture_backend_available() -> bool:
     return cv2 is not None and HAS_MP
 
 
+def _camera_candidates(camera_id: int) -> list[int]:
+    """Ordered camera indices to try: the requested one, then 0, 1, and -1."""
+    candidates = []
+    for index in (camera_id, 0, 1, -1):
+        if index not in candidates:
+            candidates.append(index)
+    return candidates
+
+
+def _camera_backends() -> list:
+    """Camera backend flags to try, platform-preferred first (DirectShow on Windows)."""
+    if cv2 is None:
+        return []
+    backends = []
+    for name in ("CAP_DSHOW", "CAP_MSMF", "CAP_V4L2", "CAP_ANY"):
+        backend = getattr(cv2, name, None)
+        if backend is not None and backend not in backends:
+            backends.append(backend)
+    return backends
+
+
+def open_camera(camera_id: int = 0):
+    """Open a webcam that reliably delivers frames, or return None.
+
+    Tries the requested index (then 0, 1, -1) with each platform backend
+    (DirectShow first on Windows) and reads a few warm-up frames to discard the
+    initial black frames most cameras emit. The returned capture is open and
+    producing frames.
+    """
+    if cv2 is None:
+        return None
+    for index in _camera_candidates(camera_id):
+        for backend in _camera_backends():
+            try:
+                cap = cv2.VideoCapture(index, backend)
+            except Exception:
+                cap = None
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                continue
+            for _ in range(6):
+                try:
+                    ret, frame = cap.read()
+                except Exception:
+                    ret = False
+                if ret and frame is not None and frame.size > 0:
+                    logger.info("Camera %s opened (backend %s)", index, backend)
+                    return cap
+                time.sleep(0.03)
+            cap.release()
+    return None
+
+
 def count_extended_fingers(landmarks) -> list[bool]:
     """Return [thumb, index, middle, ring, pinky] extended booleans.
 
@@ -346,6 +400,8 @@ class GestureController:
         )
         self._cap = None
         self._detector = None
+        self._read_failures = 0
+        self.max_read_failures = 10
         self._setup()
 
     def _setup(self) -> None:
@@ -361,16 +417,7 @@ class GestureController:
                 + " not installed; run: pip install -r requirements.txt"
             )
             return
-        try:
-            self._cap = cv2.VideoCapture(self.camera_id)
-            if not self._cap.isOpened():
-                self._cap.release()
-                self._cap = None
-                self.error = f"Could not open camera {self.camera_id}"
-                return
-        except Exception as exc:
-            self.error = str(exc)
-            logger.exception("Failed to open camera %s", self.camera_id)
+        if not self._open_camera(self.camera_id):
             return
         self._detector = self._make_detector()
         if self._detector is None:
@@ -427,33 +474,43 @@ class GestureController:
             logger.exception("Hand-landmarker model download failed")
             return None
 
-    def set_camera(self, camera_id: int) -> bool:
-        """Re-open a different camera; returns True on success."""
-        self.camera_id = camera_id
+    def _open_camera(self, camera_id: int | None = None) -> bool:
+        """Open (or reopen) the webcam with backend and index fallback.
+
+        Returns True when a validated camera is open; on failure the capture is
+        released and ``self.error`` records why.
+        """
+        requested = self.camera_id if camera_id is None else camera_id
+        self.camera_id = requested
         if self._cap is not None:
-            self._cap.release()
+            try:
+                self._cap.release()
+            except Exception:
+                pass
             self._cap = None
         if cv2 is None:
-            return False
-        try:
-            self._cap = cv2.VideoCapture(camera_id)
-            opened = bool(self._cap and self._cap.isOpened())
-            self.available = opened
-            if opened:
-                logger.info("Gesture control switched to camera %s", camera_id)
-            else:
-                self._cap.release()
-                self._cap = None
-                self.error = f"Could not open camera {camera_id}"
-                self.available = False
-            return opened
-        except Exception as exc:
-            self.error = str(exc)
             self.available = False
+            self.error = "opencv-python is not installed"
             return False
+        cap = open_camera(requested)
+        if cap is None:
+            self.available = False
+            self.error = f"Could not open camera {requested} with any backend"
+            logger.error("%s", self.error)
+            return False
+        self._cap = cap
+        self.available = True
+        self.error = None
+        logger.info("Camera %s opened", requested)
+        return True
 
-    def _draw_preview(self, frame, landmarks, action) -> None:
-        if cv2 is None or not self.show_preview or frame is None:
+    def set_camera(self, camera_id: int) -> bool:
+        """Re-open camera ``camera_id`` (with fallback); returns True on success."""
+        return self._open_camera(camera_id)
+
+    def _annotate_frame(self, frame, landmarks, action) -> None:
+        """Draw the hand skeleton and a gesture label onto ``frame`` in place."""
+        if cv2 is None or frame is None:
             return
         if landmarks is not None:
             h, w = frame.shape[:2]
@@ -473,13 +530,53 @@ class GestureController:
             2,
             cv2.LINE_AA,
         )
-        cv2.imshow("Gesture Control", frame)
+
+    def _draw_preview(self, frame, landmarks, action) -> None:
+        if frame is None:
+            return
+        self._annotate_frame(frame, landmarks, action)
+        if self.show_preview and cv2 is not None:
+            cv2.imshow("Gesture Control", frame)
+
+    def get_preview_frame(self):
+        """Return one annotated frame for display, or None when unavailable.
+
+        Used by ``--raw-preview``-style debugging and external preview loops:
+        the frame is always returned (even when no hand is detected), with the
+        hand skeleton overlay drawn when landmarks are present.
+        """
+        if not self.available or self._cap is None or self._detector is None:
+            return None
+        try:
+            ok, frame = self._cap.read()
+        except Exception:
+            return None
+        if not ok or frame is None:
+            return None
+        frame = cv2.flip(frame, 1)
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            landmarks = self._detector.process(rgb)
+        except Exception:
+            landmarks = None
+        action = None
+        if landmarks is not None:
+            now = time.time()
+            palm = landmarks[_PALM]
+            swipe = self._swipes.feed(now, palm.x, palm.y)
+            if swipe:
+                action = swipe
+            elif not self._swipes.ignore_static(now):
+                action = classify_hand(landmarks)
+        self._annotate_frame(frame, landmarks, action)
+        return frame
 
     def detect_gesture(self) -> str | None:
         """Capture one frame and return an action string, or None.
 
         Raises no exceptions when the camera is unavailable; it returns None
-        and logs at debug level.
+        and logs at debug level. After several consecutive failed reads the
+        camera is re-opened automatically.
         """
         if not self.available or self._cap is None or self._detector is None:
             return None
@@ -487,10 +584,15 @@ class GestureController:
             ok, frame = self._cap.read()
         except Exception as exc:
             logger.debug("Camera read failed: %s", exc)
+            ok = False
+        if not ok or frame is None:
+            self._read_failures += 1
+            if self._read_failures >= self.max_read_failures:
+                logger.warning("Camera read failed %d times; re-opening the camera", self._read_failures)
+                self._open_camera()
+                self._read_failures = 0
             return None
-        if not ok:
-            logger.debug("Camera returned no frame")
-            return None
+        self._read_failures = 0
 
         frame = cv2.flip(frame, 1)  # mirror like a selfie view
         try:
