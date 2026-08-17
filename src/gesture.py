@@ -408,6 +408,30 @@ def draw_volume_bar(frame, percent, show_label: bool = True) -> None:
         )
 
 
+# BGR colors used by the on-preview gesture feedback overlay.
+_FEEDBACK_GREEN = (60, 200, 60)
+_FEEDBACK_BLUE = (255, 150, 40)
+_FEEDBACK_ORANGE = (0, 165, 255)
+_FEEDBACK_RED = (40, 40, 230)
+_FEEDBACK_YELLOW = (40, 210, 230)
+_FEEDBACK_CYAN = (220, 210, 40)
+
+# action -> (human-readable gesture name, short description, BGR color).
+# Volume descriptions are refined at draw time with the configured step.
+GESTURE_FEEDBACK = {
+    "play_pause": ("Index Finger Up", "Play / Pause", _FEEDBACK_GREEN),
+    "stop": ("Closed Fist", "Stop", _FEEDBACK_RED),
+    "volume_up": ("Thumbs Up", "Volume +{step}", _FEEDBACK_BLUE),
+    "volume_down": ("Thumbs Down", "Volume -{step}", _FEEDBACK_BLUE),
+    "toggle_mute": ("Peace Sign", "Mute / Unmute", _FEEDBACK_YELLOW),
+    "toggle_fullscreen": ("Pinch", "Toggle Fullscreen", _FEEDBACK_CYAN),
+    "skip_forward": ("Swipe Right", "Skip Forward", _FEEDBACK_ORANGE),
+    "skip_backward": ("Swipe Left", "Skip Backward", _FEEDBACK_ORANGE),
+    "volume_up_big": ("Swipe Up", "Volume +10", _FEEDBACK_ORANGE),
+    "volume_down_big": ("Swipe Down", "Volume -10", _FEEDBACK_ORANGE),
+}
+
+
 def _download_hand_model(path: Path) -> None:
     """Download the hand-landmarker model to ``path`` if it is missing."""
     if path.exists():
@@ -641,6 +665,7 @@ class GestureController:
         self,
         camera_id: int = 0,
         show_preview: bool = False,
+        show_feedback: bool = True,
         debounce_frames: int = 3,
         cooldown_seconds: float = 0.5,
         model_path: str | os.PathLike | None = None,
@@ -657,6 +682,7 @@ class GestureController:
     ):
         self.camera_id = camera_id
         self.show_preview = show_preview
+        self.show_feedback = bool(show_feedback)
         self.debounce_frames = max(1, debounce_frames)
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self.model_path = model_path
@@ -831,6 +857,8 @@ class GestureController:
         if frame is None:
             return
         self._annotate_frame(frame, landmarks, action)
+        if self.show_feedback:
+            self._draw_feedback(frame, action)
         if self.show_preview and cv2 is not None:
             draw_volume_bar(frame, self._current_volume())
             cv2.imshow("Gesture Control", frame)
@@ -855,6 +883,36 @@ class GestureController:
                 self._volume_cache = self.volume_percent
             return self._volume_cache
         return self.volume_percent
+
+    def _draw_feedback(self, frame, action) -> None:
+        """Overlay the human-readable gesture name, action and volume on ``frame``.
+
+        Drawn at the top-left below the gesture label when ``show_feedback`` is
+        enabled. Volume actions include the configured step and the current
+        volume; each gesture type gets its own color (green play, blue volume,
+        orange skip, red stop, yellow mute, cyan fullscreen).
+        """
+        if cv2 is None or frame is None:
+            return
+        entry = GESTURE_FEEDBACK.get(action)
+        if entry is None:
+            return
+        name, description, color = entry
+        description = description.replace("{step}", str(self.volume_step))
+        lines = [name, description]
+        lines.append(f"Volume: {self._current_volume()}%")
+        y = 66
+        for i, text in enumerate(lines):
+            cv2.putText(
+                frame,
+                text,
+                (12, y + i * 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7 if i == 0 else 0.55,
+                color if i == 0 else (255, 255, 255),
+                2 if i == 0 else 1,
+                cv2.LINE_AA,
+            )
 
     def _track_volume(self, action) -> None:
         """Keep the local volume estimate in sync when a volume action fires."""
@@ -900,6 +958,8 @@ class GestureController:
                     debug=self.gesture_debug,
                 )
         self._annotate_frame(frame, landmarks, action)
+        if self.show_feedback:
+            self._draw_feedback(frame, action)
         if self.show_preview:
             draw_volume_bar(frame, self._current_volume())
         return frame

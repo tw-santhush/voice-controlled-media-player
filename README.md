@@ -96,6 +96,7 @@ python src/main.py --mode both --player auto --continuous
 | `--energy-test`| Measure audio energy for 5 seconds and suggest a value for `voice.energy_threshold`, then exit. |
 | `--set-energy` | Override `voice.energy_threshold` for this run (e.g. `--set-energy 100`). |
 | `--tray`       | Run in the background with a system-tray icon (requires `pystray`; automatic terminal fallback if missing). |
+| `--no-tray`    | Force terminal mode even when `tray.enabled` is set in config. |
 | `--test-tray`  | Run only the tray icon **without** the voice listener, so the tray menu can be verified manually; exits after 30 seconds or via the tray menu. |
 | `--hotkey`     | Global hotkey that toggles listening on/off while running in the background (default: `ctrl+shift+l`; requires `keyboard`). |
 | `--install-startup` | Windows only: create a Startup-folder shortcut that launches the app with the tray icon at logon, then exit. |
@@ -166,6 +167,7 @@ Gesture tuning lives under the `gesture` section in `config.json`:
     "finger_angle_threshold": 30.0,
     "volume_interval_seconds": 0.5,
     "volume_step": 5,
+    "show_feedback": true,
     "debug": false,
     "model_path": null
 }
@@ -182,6 +184,9 @@ Gesture tuning lives under the `gesture` section in `config.json`:
 - `finger_angle_threshold`: a finger counts as extended only when its PIP joint opens past this angle in degrees (the straighter the finger, the wider the angle). This replaces the old tip-height rule that misread curled but raised fingers as extended (default `30.0`).
 - `volume_interval_seconds`: how often continuous volume adjustment triggers when holding thumbs up/down (default `0.5`).
 - `volume_step`: how much volume changes per step (default `5`).
+- `show_feedback`: when `--show-preview` is enabled, overlay the detected gesture's name, action and current volume on
+  the camera feed (e.g. "Thumbs Up → Volume +5 · Volume: 45%"). Colors indicate the gesture type: green play/pause,
+  blue volume, orange swipe, red stop, yellow mute, cyan fullscreen (default `true`).
 - `debug`: log per-frame finger angles and detection reasons to help tune thresholds (default `false`).
 - `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 
@@ -209,6 +214,19 @@ Then launch it in tray mode:
 ```powershell
 python src/main.py --tray
 ```
+
+You can also default the app to tray mode from config so every launch runs in the background without the flag:
+
+```json
+"tray": {
+    "enabled": true,
+    "auto_start": false
+}
+```
+
+- `enabled`: acts like passing `--tray` on every run (use `--no-tray` to force terminal mode for a single run).
+- `auto_start`: when `true` and running in tray mode on Windows, the app installs the logon Startup shortcut
+  (`--install-startup`) for you on first launch.
 
 - In the default gesture mode a **camera** icon appears in the tray; in voice mode it is a **microphone** icon.
   Either way: **green** while it is actively listening, **yellow** while the TTS response is still being spoken
@@ -284,7 +302,8 @@ python src/main.py --uninstall-startup
 ```
 
 `--install-startup` checks that `pythonw.exe` exists next to your `python.exe` (a standard Windows Python) and that
-`pystray` is installed, and refuses otherwise.
+`pystray` is installed, and refuses otherwise. With `"tray": {"enabled": true, "auto_start": true}` in config this
+shortcut is created automatically the first time the app runs in tray mode.
 
 ## Configuration
 
@@ -305,8 +324,9 @@ To customize:
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
    | `voice`            | Listening timeout, phrase time limit (seconds), `energy_threshold`, plus the **noise gate** and **confidence threshold** (see below) |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
-   | `gesture`          | Gesture control: `camera_id`, swipe speed/distance/consistency thresholds, pinch and finger-joint thresholds, `debug`, and `model_path` (see Gesture Control) |
-   | `player`           | Default skip seconds and volume step                                     |
+| `gesture`          | Gesture control: `camera_id`, swipe speed/distance/consistency thresholds, pinch and finger-joint thresholds, `show_feedback`, `debug`, and `model_path` (see Gesture Control) |
+| `tray`             | Background mode: `enabled` acts like `--tray` on every run, `auto_start` installs the logon shortcut |
+| `player`           | Default skip seconds and volume step                                     |
    | `push_to_talk`     | Push-to-talk: `enabled` and the `key` to hold                             |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
    | `commands`         | Spoken phrases → action mappings for voice commands (see Voice Commands) |
@@ -491,6 +511,13 @@ parsed as an absolute volume, clamped to 0-100. Any number found in the phrase i
 These are processed only when the phrase does **not** match a regular command first, so relative commands like
 "volume up"/"volume down" win over numeric parsing. Numeric volume is sent to the player through its web
 interface (`command=volume&val=N` for VLC, `volume=N` for MPC-HC).
+
+### VLC volume scale (0-100 app → 0-200 VLC)
+
+VLC's HTTP interface uses a **0-200** volume range where `100` is 100%; MPC-HC uses 0-100. The app always works in
+0-100, so for VLC the value is **doubled on the way in** (e.g. "volume 50" sends `val=100`, which VLC reads as 50%,
+not 25%) and **halved when read back** (`get_volume`, the preview volume bar). Relative steps are scaled the same
+way (`volume_up`/`volume_down` move VLC by twice the app step). MPC-HC needs no conversion.
 
 ### Pause and resume listening
 

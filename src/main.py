@@ -1238,6 +1238,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Run in the background with a system-tray icon (requires pystray)",
     )
     parser.add_argument(
+        "--no-tray",
+        action="store_true",
+        help="Disable the system-tray icon even if tray.enabled is set in config",
+    )
+    parser.add_argument(
         "--test-tray",
         action="store_true",
         help="Run only the tray icon without the voice listener (manual menu test, exits after 30s)",
@@ -1275,6 +1280,17 @@ def main(argv: list[str] | None = None) -> None:
         help="Remove the Windows Startup-folder shortcut installed by --install-startup, then exit",
     )
     args = parser.parse_args(argv)
+
+    # tray.enabled in config acts like --tray unless --no-tray is given.
+    # Resolve it early so logging and mode selection see the right value.
+    if args.config:
+        config.get_config(config_path=args.config)
+    try:
+        tray_enabled_cfg = bool(getattr(getattr(config.get_config(), "tray", None), "enabled", False))
+    except Exception:
+        tray_enabled_cfg = False
+    if not args.no_tray and (args.tray or tray_enabled_cfg):
+        args.tray = True
 
     log = setup_logging(console_level=logging.ERROR if args.tray else logging.INFO)
 
@@ -1447,6 +1463,7 @@ def main(argv: list[str] | None = None) -> None:
                 getattr(gesture_cfg, "finger_angle_threshold", 30.0) if gesture_cfg else 30.0
             ),
             gesture_debug=getattr(gesture_cfg, "debug", False) if gesture_cfg else False,
+            show_feedback=getattr(gesture_cfg, "show_feedback", True) if gesture_cfg else True,
             volume_interval_seconds=(
                 getattr(gesture_cfg, "volume_interval_seconds", 0.5) if gesture_cfg else 0.5
             ),
@@ -1522,6 +1539,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.tray and (not HAS_TRAY or not tray._tray_available()):
         log.warning("pystray is not installed; falling back to terminal mode")
         args.tray = False
+
+    if args.tray and sys.platform == "win32" and getattr(getattr(cfg, "tray", None), "auto_start", False):
+        try:
+            shortcut = startup_shortcut_path()
+            if not shortcut.exists():
+                install_startup(shortcut)
+                log.info("Installed logon autostart shortcut (tray.auto_start)")
+        except OSError as exc:
+            log.warning("Could not auto-install the startup shortcut: %s", exc)
 
     if not args.tray:
         print(f"{('Gesture control' if mode != 'voice' else 'Listening')}... {hint}, player={args.player}. Press Ctrl+C to stop.")

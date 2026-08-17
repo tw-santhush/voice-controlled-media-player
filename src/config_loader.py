@@ -50,8 +50,13 @@ DEFAULT_CONFIG = {
         "finger_angle_threshold": 30.0,
         "volume_interval_seconds": 0.5,
         "volume_step": 5,
+        "show_feedback": True,
         "model_path": None,
         "debug": False,
+    },
+    "tray": {
+        "enabled": False,
+        "auto_start": False,
     },
     "push_to_talk": {
         "enabled": False,

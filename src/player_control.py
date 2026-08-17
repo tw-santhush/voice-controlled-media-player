@@ -16,7 +16,17 @@ import config
 
 logger = logging.getLogger(__name__)
 
-VLC_VOLUME_MAX = 300
+VLC_VOLUME_MAX = 200  # VLC's HTTP volume scale is 0-200, where 100 == 100%
+
+
+def _vlc_volume_from_app(percent: int) -> int:
+    """Convert an app-scale 0-100 percent into the VLC HTTP scale (0-200)."""
+    return max(0, min(VLC_VOLUME_MAX, int(round(float(percent) * 2))))
+
+
+def _app_volume_from_vlc(vlc_volume) -> int:
+    """Convert a VLC HTTP volume (0-200) back to the app-scale 0-100 percent."""
+    return max(0, min(100, int(round(float(vlc_volume) / 2))))
 
 REQUESTS_HINT = (
     "requests is not installed. Activate your virtual environment and run: "
@@ -254,7 +264,8 @@ class VLCController(PlayerController):
             return
         try:
             volume, _ = self._status()
-            new_volume = min(int(volume) + step, VLC_VOLUME_MAX)
+            # The step is an app-scale percent, so it must be doubled for VLC.
+            new_volume = min(int(volume) + int(step) * 2, VLC_VOLUME_MAX)
             self._http("volume", {"val": new_volume})
         except requests.RequestException:
             logger.exception("[vlc] HTTP volume up failed")
@@ -268,7 +279,7 @@ class VLCController(PlayerController):
             return
         try:
             volume, _ = self._status()
-            new_volume = max(int(volume) - step, 0)
+            new_volume = max(int(volume) - int(step) * 2, 0)
             self._http("volume", {"val": new_volume})
         except requests.RequestException:
             logger.exception("[vlc] HTTP volume down failed")
@@ -277,26 +288,35 @@ class VLCController(PlayerController):
         self._report(f"volume_down (-{step})")
 
     def set_volume(self, percent: int) -> None:
-        """Set the absolute volume (0-100) on the VLC HTTP interface."""
+        """Set the absolute volume on the VLC HTTP interface.
+
+        The app works in 0-100 percent; VLC's HTTP "volume" command uses a
+        0-200 scale where 100 is 100%, so the value is scaled by two on the way
+        in (e.g. "volume 50" becomes ``val=100`` = 50% on VLC, not 25%).
+        """
         percent = max(0, min(100, int(round(float(percent)))))
         if not self._check_enabled():
             return
         try:
-            self._http("volume", {"val": percent})
+            self._http("volume", {"val": _vlc_volume_from_app(percent)})
         except requests.RequestException:
             logger.exception("[vlc] HTTP set_volume failed")
             return
         self._report(f"set_volume ({percent})")
 
     def get_volume(self) -> int | None:
-        """Return the current VLC volume clamped to 0-100, or None on failure."""
+        """Return the current VLC volume as a 0-100 percent, or None on failure.
+
+        VLC reports volume on its own 0-200 scale; this divides it by two so
+        the app (and the preview volume bar) always work in 0-100.
+        """
         self._check_enabled()
         try:
             volume, _ = self._status()
         except (requests.RequestException, ValueError, ET.ParseError):
             logger.debug("[vlc] get_volume failed")
             return None
-        return max(0, min(100, int(round(volume))))
+        return _app_volume_from_vlc(volume)
 
     def next(self):
         if not self._check_enabled():

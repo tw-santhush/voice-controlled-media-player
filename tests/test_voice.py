@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import config
+import config_loader
 import gesture
 import main
 import requests
@@ -507,14 +508,54 @@ class TestControllers(unittest.TestCase):
             controller.set_volume(75)
         mock_get.assert_called_once()
         self.assertEqual(mock_get.call_args[0][0], "http://localhost:8080/requests/status.xml")
-        self.assertEqual(mock_get.call_args[1]["params"], {"command": "volume", "val": 75})
+        self.assertEqual(mock_get.call_args[1]["params"], {"command": "volume", "val": 150})
 
-    def test_vlc_set_volume_clamps_to_100(self):
+    def test_vlc_set_volume_scales_app_percent_to_vlc_range(self):
+        # App 0-100 maps to VLC's 0-200 range: 50% -> val 100, 100% -> val 200.
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        for app_percent, vlc_value in [(0, 0), (50, 100), (100, 200)]:
+            with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+                controller.set_volume(app_percent)
+            self.assertEqual(mock_get.call_args[1]["params"]["val"], vlc_value)
+
+    def test_vlc_set_volume_clamps_to_100_percent(self):
         controller = VLCController()
         mock_response = unittest.mock.MagicMock()
         with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
             controller.set_volume(500)
-        self.assertEqual(mock_get.call_args[1]["params"]["val"], 100)
+        self.assertEqual(mock_get.call_args[1]["params"]["val"], 200)
+
+    def test_vlc_get_volume_scales_to_app_percent(self):
+        controller = VLCController()
+        with patch.object(controller, "_status", return_value=(140, False)):
+            self.assertEqual(controller.get_volume(), 70)
+
+    def test_vlc_get_volume_clamps_to_100_percent(self):
+        controller = VLCController()
+        with patch.object(controller, "_status", return_value=(420, False)):
+            self.assertEqual(controller.get_volume(), 100)
+
+    def test_vlc_get_volume_returns_none_on_failure(self):
+        controller = VLCController()
+        with patch.object(controller, "_status", side_effect=requests.ConnectionError("refused")):
+            self.assertIsNone(controller.get_volume())
+
+    def test_vlc_volume_up_doubles_app_step_on_vlc_scale(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller, "_status", return_value=(100, False)):
+            with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+                controller.volume_up(step=5)
+        self.assertEqual(mock_get.call_args[1]["params"]["val"], 110)
+
+    def test_vlc_volume_down_doubles_app_step_on_vlc_scale(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller, "_status", return_value=(100, False)):
+            with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+                controller.volume_down(step=5)
+        self.assertEqual(mock_get.call_args[1]["params"]["val"], 90)
 
     def test_vlc_next_sends_pl_next(self):
         controller = VLCController()
@@ -1834,6 +1875,78 @@ class TestGestureSwipe(unittest.TestCase):
         self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
 
 
+class TestGestureFeedback(unittest.TestCase):
+    def test_every_gesture_action_has_feedback(self):
+        actions = [
+            "play_pause",
+            "stop",
+            "volume_up",
+            "volume_down",
+            "toggle_mute",
+            "toggle_fullscreen",
+            "skip_forward",
+            "skip_backward",
+            "volume_up_big",
+            "volume_down_big",
+        ]
+        for action in actions:
+            self.assertIn(action, gesture.GESTURE_FEEDBACK)
+            name, description, color = gesture.GESTURE_FEEDBACK[action]
+            self.assertTrue(name)
+            self.assertTrue(description)
+            self.assertEqual(len(color), 3)
+
+    def test_feedback_defaults_to_enabled(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertTrue(controller.show_feedback)
+
+    def test_feedback_can_be_disabled(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController(show_feedback=False)
+        self.assertFalse(controller.show_feedback)
+
+    def _feedback_controller(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            return gesture.GestureController()
+
+    def test_draw_feedback_overlays_name_action_and_volume(self):
+        controller = self._feedback_controller()
+        controller.volume_step = 5
+        controller._current_volume = MagicMock(return_value=45)
+        cv2 = MagicMock()
+        frame = MagicMock()
+        frame.shape = (480, 640, 3)
+        with patch.object(gesture, "cv2", cv2):
+            controller._draw_feedback(frame, "volume_up")
+        texts = [call.args[1] for call in cv2.putText.call_args_list]
+        self.assertIn("Thumbs Up", texts)
+        self.assertIn("Volume +5", texts)
+        self.assertIn("Volume: 45%", texts)
+
+    def test_draw_feedback_uses_config_step_for_volume_desc(self):
+        controller = self._feedback_controller()
+        controller.volume_step = 2
+        controller._current_volume = MagicMock(return_value=40)
+        cv2 = MagicMock()
+        frame = MagicMock()
+        frame.shape = (480, 640, 3)
+        with patch.object(gesture, "cv2", cv2):
+            controller._draw_feedback(frame, "volume_down")
+        texts = [call.args[1] for call in cv2.putText.call_args_list]
+        self.assertIn("Volume -2", texts)
+
+    def test_draw_feedback_ignores_unknown_action(self):
+        controller = self._feedback_controller()
+        controller._current_volume = MagicMock(return_value=50)
+        cv2 = MagicMock()
+        frame = MagicMock()
+        frame.shape = (480, 640, 3)
+        with patch.object(gesture, "cv2", cv2):
+            controller._draw_feedback(frame, "wiggle")
+        cv2.putText.assert_not_called()
+
+
 class TestGestureSetup(unittest.TestCase):
     def test_degrades_cleanly_without_libraries(self):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
@@ -1858,6 +1971,25 @@ class TestGestureSetup(unittest.TestCase):
 
     def test_backend_availability_is_boolean(self):
         self.assertIsInstance(gesture.gesture_backend_available(), bool)
+
+    def test_default_config_has_gesture_feedback_flag(self):
+        self.assertIs(config_loader.DEFAULT_CONFIG["gesture"]["show_feedback"], True)
+
+    def test_default_config_has_tray_section(self):
+        self.assertIn("tray", config_loader.DEFAULT_CONFIG)
+        self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["enabled"], False)
+        self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["auto_start"], False)
+
+    def test_load_config_merges_missing_tray_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_cfg = {"vlc": {"enabled": False}}
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(user_cfg), encoding="utf-8")
+            cfg = config_loader.load_config(path)
+        self.assertIs(cfg.vlc.enabled, False)
+        self.assertIs(cfg.tray.enabled, False)
+        self.assertIs(cfg.tray.auto_start, False)
+        self.assertIs(cfg.gesture.show_feedback, True)
 
 
 class _Frame:
