@@ -1484,19 +1484,19 @@ def main(argv: list[str] | None = None) -> None:
             model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
             swipe_window=getattr(gesture_cfg, "swipe_window", None) if gesture_cfg else None,
             swipe_velocity_threshold=(
-                getattr(gesture_cfg, "swipe_velocity_threshold", 0.5) if gesture_cfg else 0.5
+                getattr(gesture_cfg, "swipe_velocity_threshold", 0.3) if gesture_cfg else 0.3
             ),
             swipe_min_distance=(
-                getattr(gesture_cfg, "swipe_min_distance", 0.25) if gesture_cfg else 0.25
+                getattr(gesture_cfg, "swipe_min_distance", 0.15) if gesture_cfg else 0.15
             ),
             swipe_consistency_frames=(
-                getattr(gesture_cfg, "swipe_consistency_frames", 3) if gesture_cfg else 3
+                getattr(gesture_cfg, "swipe_consistency_frames", 5) if gesture_cfg else 5
             ),
             pinch_threshold_ratio=(
                 getattr(gesture_cfg, "pinch_threshold_ratio", 0.12) if gesture_cfg else 0.12
             ),
             finger_angle_threshold=(
-                getattr(gesture_cfg, "finger_angle_threshold", 25) if gesture_cfg else 25
+                getattr(gesture_cfg, "finger_angle_threshold", 20) if gesture_cfg else 20
             ),
             gesture_debug=gesture_debug,
             show_feedback=getattr(gesture_cfg, "show_feedback", True) if gesture_cfg else True,

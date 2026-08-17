@@ -126,20 +126,23 @@ The gesture-to-action mapping:
 | Gesture            | Action               | Notes                          |
 | ------------------ | -------------------- | ------------------------------ |
 | Index finger up    | Play / Pause toggle  | Toggles between play and pause |
-| Closed fist        | Stop                 |                                |
-| Swipe left         | Skip backward        | Open hand swipe                |
-| Swipe right        | Skip forward         | Open hand swipe                |
+| Swipe left         | Skip backward        | Open hand swipe, moderately sensitive |
+| Swipe right        | Skip forward         | Open hand swipe, moderately sensitive |
 | Thumbs up          | Volume up (+5)       | Hold for continuous adjustment |
 | Thumbs down        | Volume down (-5)     | Hold for continuous adjustment |
 | Peace sign         | Mute / unmute        | Index + middle fingers         |
 | Pinch              | Toggle fullscreen    | Index + thumb pinch            |
 
-Static gestures (index up, fist, thumbs, peace, pinch) must be held for ~3 consecutive frames to fire, and commands are
+A closed fist deliberately does **nothing** — it's a resting pose, not a command.
+
+Static gestures (index up, thumbs, peace, pinch) must be held for ~3 consecutive frames to fire, and commands are
 rate-limited (~0.5 s) so a quick motion can't double-trigger. Hold your hand up, make the shape, and move it back out of
-view between commands. Swipes fire the instant the palm moves fast enough and far enough in one direction, so a single
-deliberate swipe is never dropped by the debouncer. To see exactly why each frame did or did not trigger, enable
+view between commands. Swipes fire the instant the palm moves fast enough and far enough in one direction — the
+thresholds are tuned to trigger on a moderate flick (raise `gesture.swipe_velocity_threshold` / `gesture.swipe_min_distance`
+if it feels too twitchy). No single deliberate swipe is dropped by the debouncer: a short "swipe hold" window keeps a
+quick flick armed even if the hand stops immediately. To see exactly why each frame did or did not trigger, enable
 `gesture.debug` in `config.json` or pass `--gesture-debug` — it prints every finger's joint angle, the extended-finger
-verdicts, the raw per-frame classification, and the reason each gesture fired.
+verdicts, the computed thumb angle, the swipe velocity components, and the reason each gesture fired.
 
 - `--camera` selects which webcam to read (default: config `gesture.camera_id`, else `0`). The tray menu also has a
   **Next Camera** item when running in gesture tray mode. If the requested index (or backend) fails, the app
@@ -161,11 +164,11 @@ Gesture tuning lives under the `gesture` section in `config.json`:
     "debounce_frames": 3,
     "cooldown_seconds": 0.5,
     "swipe_window": 0.4,
-    "swipe_velocity_threshold": 0.5,
-    "swipe_min_distance": 0.25,
-    "swipe_consistency_frames": 3,
+    "swipe_velocity_threshold": 0.3,
+    "swipe_min_distance": 0.15,
+    "swipe_consistency_frames": 5,
     "pinch_threshold_ratio": 0.12,
-    "finger_angle_threshold": 25,
+    "finger_angle_threshold": 20,
     "volume_interval_seconds": 0.5,
     "volume_step": 5,
     "show_feedback": true,
@@ -178,16 +181,16 @@ Gesture tuning lives under the `gesture` section in `config.json`:
 - `debounce_frames`: consecutive frames a static gesture must be held before it fires (default `3`).
 - `cooldown_seconds`: minimum pause between commands in seconds (default `0.5`).
 - `swipe_window`: seconds of palm history considered for a swipe (default `0.4`).
-- `swipe_velocity_threshold`: minimum average palm speed, in normalized units per second, to count as a swipe (default `0.5`).
-- `swipe_min_distance`: minimum total palm travel, in normalized units of the frame, for a swipe (default `0.25`).
-- `swipe_consistency_frames`: consecutive recent samples that must all move in the dominant direction before a swipe fires, rejecting tremors and direction flips (default `3`).
+- `swipe_velocity_threshold`: minimum average palm speed, in normalized units per second, to count as a swipe (default `0.3`).
+- `swipe_min_distance`: minimum total palm travel, in normalized units of the frame, for a swipe (default `0.15`).
+- `swipe_consistency_frames`: consecutive recent samples that must all move in the dominant direction before a swipe fires, rejecting tremors and direction flips (default `5`). A quick flick can still fire even when its travel stays under `swipe_min_distance`, thanks to a short swipe-hold window.
 - `pinch_threshold_ratio`: a pinch is recognized when the gap between the thumb and index tips is smaller than this fraction of the hand's own size (wrist-to-palm span), so near and far hands work the same (default `0.12`).
-- `finger_angle_threshold`: a finger counts as extended only when its PIP joint opens past this angle in degrees (the straighter the finger, the wider the angle). This replaces the old tip-height rule that misread curled but raised fingers as extended (default `25`).
+- `finger_angle_threshold`: a finger counts as extended only when its PIP joint opens past this angle in degrees (the straighter the finger, the wider the angle). This replaces the old tip-height rule that misread curled but raised fingers as extended (default `20`).
 - `volume_interval_seconds`: how often continuous volume adjustment triggers when holding thumbs up/down (default `0.5`).
 - `volume_step`: how much volume changes per step (default `5`).
 - `show_feedback`: when `--show-preview` is enabled, overlay the detected gesture's name, action and current volume on
   the camera feed (e.g. "Thumbs Up → Volume +5 · Volume: 45%"). Colors indicate the gesture type: green play/pause,
-  blue volume, orange swipe, red stop, yellow mute, cyan fullscreen (default `true`).
+  blue volume, orange swipe, yellow mute, cyan fullscreen (default `true`).
 - `debug`: log per-frame finger angles, extended-finger counts and detection reasons to help tune thresholds (default `false`). The same output plus relaxed test thresholds can be enabled per-run with `--gesture-debug`.
 - `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 

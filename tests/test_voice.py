@@ -1682,8 +1682,14 @@ class TestGestureRecognition(unittest.TestCase):
     def test_classify_open_hand_none(self):
         self.assertEqual(gesture.classify_hand(_hand()), None)
 
-    def test_classify_fist_stop(self):
-        self.assertEqual(gesture.classify_hand(_hand((False, False, False, False, False))), "stop")
+    def test_classify_fist_does_nothing(self):
+        self.assertIsNone(gesture.classify_hand(_hand((False, False, False, False, False))))
+
+    def test_classify_fist_debug_logs_ignored(self):
+        with self.assertLogs("gesture", level="DEBUG") as cm:
+            gesture.classify_hand(_hand((False, False, False, False, False)), debug=True)
+        text = "\n".join(cm.output)
+        self.assertIn("Classification: None (closed fist ignored (no action))", text)
 
     def test_classify_peace_mute(self):
         self.assertEqual(gesture.classify_hand(_hand((False, True, True, False, False))), "toggle_mute")
@@ -1809,8 +1815,17 @@ class TestGestureRecognition(unittest.TestCase):
         lm = _hand((True, False, False, False, False))
         lm[gesture._PALM] = _Landmark(0.70, 0.85)
         lm[gesture._THUMB_IP] = _Landmark(0.75, 0.80)
-        lm[gesture._THUMB_TIP] = _Landmark(0.75, 0.78)
+        lm[gesture._THUMB_TIP] = _Landmark(0.75, 0.79)
         self.assertIsNone(gesture.classify_thumb_direction(lm))
+
+    def test_thumb_direction_debug_logs_angle_and_threshold(self):
+        lm = _hand((True, False, False, False, False))
+        with self.assertLogs("gesture", level="DEBUG") as cm:
+            self.assertEqual(gesture.classify_thumb_direction(lm, debug=True), "up")
+        text = "\n".join(cm.output)
+        self.assertIn("thumb-vs-axis angle=", text)
+        self.assertIn("up <=", text)
+        self.assertIn("down >=", text)
 
 
 class TestGestureDebouncer(unittest.TestCase):
@@ -1909,12 +1924,44 @@ class TestGestureSwipe(unittest.TestCase):
         # way, so no swipe is reported for this frame.
         self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
 
+    def test_quick_flick_fires_within_hold_window(self):
+        # A fast flick whose total travel stays under min_distance is armed on
+        # the first fast frame and fires on the next consistent fast frame, so
+        # a flick that stops immediately is still recognized.
+        tracker = gesture.SwipeTracker(
+            window=0.5, velocity_threshold=0.2, min_distance=0.15, consistency_frames=2, hold=0.15
+        )
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))      # fast but short: armed
+        self.assertEqual(tracker.feed(100.2, 0.61, 0.5), "skip_forward")
+
+    def test_swipe_hold_expires_when_hand_rests(self):
+        tracker = gesture.SwipeTracker(
+            window=0.5, velocity_threshold=0.2, min_distance=0.2, consistency_frames=2, hold=0.15
+        )
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))      # armed
+        self.assertIsNone(tracker.feed(100.3, 0.61, 0.5))     # past the hold window
+
+    def test_swipe_debug_logs_velocity_components(self):
+        tracker = gesture.SwipeTracker(
+            window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2, debug=True
+        )
+        tracker.feed(100.0, 0.5, 0.5)
+        with self.assertLogs("gesture", level="DEBUG") as cm:
+            tracker.feed(100.1, 0.7, 0.5)
+        text = "\n".join(cm.output)
+        self.assertIn("Swipe: dx=", text)
+        self.assertIn("travel=", text)
+        self.assertIn("velocity=", text)
+        self.assertIn("direction=right", text)
+        self.assertIn("consistent=True", text)
+
 
 class TestGestureFeedback(unittest.TestCase):
     def test_every_gesture_action_has_feedback(self):
         actions = [
             "play_pause",
-            "stop",
             "volume_up",
             "volume_down",
             "toggle_mute",
@@ -2017,9 +2064,11 @@ class TestGestureSetup(unittest.TestCase):
 
     def test_default_config_gesture_thresholds_are_tuned(self):
         g = config_loader.DEFAULT_CONFIG["gesture"]
-        self.assertEqual(g["finger_angle_threshold"], 25)
+        self.assertEqual(g["finger_angle_threshold"], 20)
         self.assertEqual(g["pinch_threshold_ratio"], 0.12)
-        self.assertEqual(g["swipe_min_distance"], 0.25)
+        self.assertEqual(g["swipe_min_distance"], 0.15)
+        self.assertEqual(g["swipe_velocity_threshold"], 0.3)
+        self.assertEqual(g["swipe_consistency_frames"], 5)
 
     def test_load_config_merges_missing_tray_section(self):
         with tempfile.TemporaryDirectory() as tmp:
