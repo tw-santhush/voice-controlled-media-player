@@ -1430,8 +1430,23 @@ def main(argv: list[str] | None = None) -> None:
             debounce_frames=getattr(gesture_cfg, "debounce_frames", 3) if gesture_cfg else 3,
             cooldown_seconds=getattr(gesture_cfg, "cooldown_seconds", 0.5) if gesture_cfg else 0.5,
             model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
-            swipe_threshold=getattr(gesture_cfg, "swipe_threshold", None) if gesture_cfg else None,
-            pinch_threshold=getattr(gesture_cfg, "pinch_threshold", 0.05) if gesture_cfg else 0.05,
+            swipe_window=getattr(gesture_cfg, "swipe_window", None) if gesture_cfg else None,
+            swipe_velocity_threshold=(
+                getattr(gesture_cfg, "swipe_velocity_threshold", 0.5) if gesture_cfg else 0.5
+            ),
+            swipe_min_distance=(
+                getattr(gesture_cfg, "swipe_min_distance", 0.12) if gesture_cfg else 0.12
+            ),
+            swipe_consistency_frames=(
+                getattr(gesture_cfg, "swipe_consistency_frames", 3) if gesture_cfg else 3
+            ),
+            pinch_threshold_ratio=(
+                getattr(gesture_cfg, "pinch_threshold_ratio", 0.25) if gesture_cfg else 0.25
+            ),
+            finger_angle_threshold=(
+                getattr(gesture_cfg, "finger_angle_threshold", 30.0) if gesture_cfg else 30.0
+            ),
+            gesture_debug=getattr(gesture_cfg, "debug", False) if gesture_cfg else False,
             volume_interval_seconds=(
                 getattr(gesture_cfg, "volume_interval_seconds", 0.5) if gesture_cfg else 0.5
             ),

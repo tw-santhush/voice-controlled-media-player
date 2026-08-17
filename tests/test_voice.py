@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import struct
 import sys
@@ -1568,41 +1569,65 @@ class _Landmark:
         self.y = y
 
 
-def _hand(open_fingers=(True, True, True, True, True)):
-    """Build a 21-keypoint hand landmark list.
+def _hand(fingers=(True, True, True, True, True), rotate=0.0, thumb_tip=None, thumb_ip=None):
+    """Build a 21-keypoint hand landmark list with realistic joint geometry.
 
-    open_fingers = (thumb, index, middle, ring, pinky). Tips point up (smaller
-    y) when open and curl down near the PIP when closed. The thumb extends out
-    to the side when open.
+    ``fingers = (thumb, index, middle, ring, pinky)``. A ``True`` long finger is
+    straight (PIP joint angle ~180deg), a ``False`` one is curled into the palm
+    (PIP joint angle ~18deg) so the angle-based detector can tell them apart.
+    The thumb sticks up-left when extended and tucks down near its IP joint when
+    folded. ``rotate`` spins the whole hand about the wrist (degrees) to model a
+    tilted/rotated hand, and ``thumb_tip``/``thumb_ip`` override those landmarks
+    (used for thumbs up/down and pinch fixtures).
     """
-    lm = [_Landmark(0.5, 0.2) for _ in range(21)]
-    lm[0] = _Landmark(0.5, 0.9)  # wrist
-    lm[1] = _Landmark(0.36, 0.75)  # thumb CMC
-    lm[2] = _Landmark(0.34, 0.6)  # thumb MCP
-    lm[3] = _Landmark(0.36, 0.46)  # thumb IP
-    lm[4] = _Landmark(0.30, 0.30) if open_fingers[0] else _Landmark(0.36, 0.48)
-    lm[5] = _Landmark(0.44, 0.55)  # index MCP
-    lm[6] = _Landmark(0.46, 0.42)  # index PIP
-    lm[8] = _Landmark(0.47, 0.22) if open_fingers[1] else _Landmark(0.47, 0.50)
-    lm[7] = _Landmark(0.50, 0.55)  # middle MCP
-    lm[9] = _Landmark(0.50, 0.55)  # palm (middle MCP)
-    lm[10] = _Landmark(0.51, 0.42)  # middle PIP
-    lm[11] = _Landmark(0.51, 0.28)
-    lm[12] = _Landmark(0.52, 0.22) if open_fingers[2] else _Landmark(0.52, 0.50)
-    lm[13] = _Landmark(0.56, 0.55)  # ring MCP
-    lm[14] = _Landmark(0.57, 0.44)  # ring PIP
-    lm[15] = _Landmark(0.57, 0.30)
-    lm[16] = _Landmark(0.58, 0.24) if open_fingers[3] else _Landmark(0.58, 0.52)
-    lm[17] = _Landmark(0.62, 0.55)  # pinky MCP
-    lm[18] = _Landmark(0.63, 0.46)  # pinky PIP
-    lm[19] = _Landmark(0.63, 0.32)
-    lm[20] = _Landmark(0.64, 0.26) if open_fingers[4] else _Landmark(0.64, 0.54)
+    wrist = (0.5, 0.85)
+    lm = [_Landmark(*wrist) for _ in range(21)]
+
+    # Thumb
+    lm[1] = _Landmark(0.35, 0.75)  # CMC
+    lm[2] = _Landmark(0.33, 0.62)  # MCP
+    lm[3] = _Landmark(*thumb_ip) if thumb_ip is not None else _Landmark(0.35, 0.50)  # IP
+    if thumb_tip is not None:
+        lm[4] = _Landmark(*thumb_tip)
+    elif fingers[0]:
+        lm[4] = _Landmark(0.26, 0.38)  # extended: up-left of the thumb IP
+    else:
+        lm[4] = _Landmark(0.38, 0.53)  # folded: tucked near the thumb IP
+
+    # Long fingers: (mcp_idx, mcp_x, pip_idx, dip_idx, tip_idx)
+    bases = [
+        (5, 0.44, 6, 7, 8),
+        (9, 0.50, 10, 11, 12),
+        (13, 0.56, 14, 15, 16),
+        (17, 0.62, 18, 19, 20),
+    ]
+    mcp_y = 0.60
+    for mcp_i, mcp_x, pip_i, dip_i, tip_i in bases:
+        if fingers[(mcp_i - 5) // 4 + 1]:
+            pip = (mcp_x, mcp_y - 0.09)
+            dip = (mcp_x, mcp_y - 0.16)
+            tip = (mcp_x, mcp_y - 0.21)
+        else:
+            pip = (mcp_x, mcp_y - 0.07)
+            dip = (mcp_x + 0.04, mcp_y + 0.05)
+            tip = (mcp_x + 0.06, mcp_y + 0.10)
+        lm[mcp_i] = _Landmark(mcp_x, mcp_y)
+        lm[pip_i] = _Landmark(*pip)
+        lm[dip_i] = _Landmark(*dip)
+        lm[tip_i] = _Landmark(*tip)
+
+    if rotate:
+        angle = math.radians(rotate)
+        ca, sa = math.cos(angle), math.sin(angle)
+        for i, p in enumerate(lm):
+            dx, dy = p.x - wrist[0], p.y - wrist[1]
+            lm[i] = _Landmark(wrist[0] + dx * ca - dy * sa, wrist[1] + dx * sa + dy * ca)
     return lm
 
 
 class TestGestureRecognition(unittest.TestCase):
     def test_open_hand_counts_five_fingers(self):
-        lm = _hand((True, True, True, True, True))
+        lm = _hand()
         self.assertEqual(gesture.count_extended_fingers(lm), [True, True, True, True, True])
 
     def test_fist_counts_no_fingers(self):
@@ -1614,7 +1639,7 @@ class TestGestureRecognition(unittest.TestCase):
         self.assertEqual(gesture.count_extended_fingers(lm), [False, True, True, False, False])
 
     def test_classify_open_hand_none(self):
-        self.assertEqual(gesture.classify_hand(_hand((True, True, True, True, True))), None)
+        self.assertEqual(gesture.classify_hand(_hand()), None)
 
     def test_classify_fist_stop(self):
         self.assertEqual(gesture.classify_hand(_hand((False, False, False, False, False))), "stop")
@@ -1627,22 +1652,89 @@ class TestGestureRecognition(unittest.TestCase):
 
     def test_classify_pinch_fullscreen(self):
         lm = _hand((True, True, False, False, False))
-        # For index to be extended, tip (lm[8]) y must be < pip (lm[6]) y. lm[6] is at 0.38.
-        # For thumb to be extended, distance tip to index_mcp > ip to index_mcp.
-        lm[8] = _Landmark(0.22, 0.35)
-        lm[4] = _Landmark(0.20, 0.35)
+        # Duplicate pinch: only thumb + index extended, tips close together.
+        lm[gesture._INDEX_PIP] = _Landmark(0.40, 0.51)
+        lm[gesture._INDEX_DIP] = _Landmark(0.36, 0.44)
+        lm[gesture._INDEX_TIP] = _Landmark(0.32, 0.37)
+        lm[gesture._THUMB_TIP] = _Landmark(0.34, 0.36)
         self.assertEqual(gesture.classify_hand(lm), "toggle_fullscreen")
+
+    def test_pinch_requires_other_fingers_folded(self):
+        lm = _hand((True, True, True, False, False))
+        lm[gesture._INDEX_PIP] = _Landmark(0.40, 0.51)
+        lm[gesture._INDEX_DIP] = _Landmark(0.36, 0.44)
+        lm[gesture._INDEX_TIP] = _Landmark(0.32, 0.37)
+        lm[gesture._THUMB_TIP] = _Landmark(0.34, 0.36)
+        self.assertNotEqual(gesture.classify_hand(lm), "toggle_fullscreen")
+
+    def test_pinch_open_gap_not_a_pinch(self):
+        lm = _hand((True, True, False, False, False))
+        lm[gesture._THUMB_TIP] = _Landmark(0.55, 0.20)  # far from the index tip
+        self.assertIsNone(gesture.classify_hand(lm))
 
     def test_classify_thumbs_up_volume_up(self):
         lm = _hand((True, False, False, False, False))
-        lm[4] = _Landmark(0.30, 0.30)  # thumb tip above the wrist (0.9)
         self.assertEqual(gesture.classify_hand(lm), "volume_up")
 
     def test_classify_thumbs_down_volume_down(self):
         lm = _hand((True, False, False, False, False))
-        lm[0] = _Landmark(0.5, 0.5)  # raise the wrist so the thumb is below it
-        lm[4] = _Landmark(0.30, 0.75)
+        lm[gesture._THUMB_TIP] = _Landmark(0.30, 0.72)
         self.assertEqual(gesture.classify_hand(lm), "volume_down")
+
+    def test_thumbs_up_survives_hand_rotation(self):
+        lm = _hand((True, False, False, False, False), rotate=45)
+        self.assertEqual(gesture.classify_hand(lm), "volume_up")
+
+    def test_thumbs_down_survives_hand_rotation(self):
+        lm = _hand((True, False, False, False, False), rotate=45)
+        lm[gesture._THUMB_TIP] = _Landmark(0.30, 0.72)
+        self.assertEqual(gesture.classify_hand(lm), "volume_down")
+
+    def test_slightly_raised_ring_finger_stays_folded(self):
+        # The classic misclassification: only the index is pointing, but the
+        # ring finger's tip sits above its PIP. A plain tip-vs-PIP height test
+        # would call it extended; the PIP-joint angle test sees a curled finger.
+        lm = _hand((False, True, False, False, False))
+        lm[gesture._RING_PIP] = _Landmark(0.57, 0.53)
+        lm[gesture._RING_DIP] = _Landmark(0.52, 0.46)
+        lm[gesture._RING_TIP] = _Landmark(0.50, 0.40)
+        self.assertFalse(gesture.count_extended_fingers(lm)[3])
+        self.assertEqual(gesture.classify_hand(lm), "play_pause")
+
+    def test_stricter_angle_threshold_rejects_curved_thumb_only(self):
+        # With a steep threshold a partially curled finger no longer counts as
+        # extended when it is really just raised rather than straight.
+        lm = _hand((False, True, False, False, False))
+        lm[gesture._MIDDLE_PIP] = _Landmark(0.50, 0.53)
+        lm[gesture._MIDDLE_DIP] = _Landmark(0.44, 0.50)
+        lm[gesture._MIDDLE_TIP] = _Landmark(0.43, 0.45)
+        self.assertFalse(gesture.count_extended_fingers(lm, finger_angle_threshold=45.0)[2])
+
+    def test_classify_hand_debug_logs_reason(self):
+        lm = _hand((True, False, False, False, False))
+        with self.assertLogs("gesture", level="DEBUG") as cm:
+            gesture.classify_hand(lm, debug=True)
+        text = "\n".join(cm.output)
+        self.assertIn("thumb: extended=yes", text)
+        self.assertIn("index finger: PIP angle", text)
+        self.assertIn("Thumb-only: relative direction=up", text)
+
+    def test_classify_hand_no_debug_log_by_default(self):
+        import logging
+
+        logger = logging.getLogger("gesture")
+        previous_level = logger.level
+        captured = []
+        handler = logging.Handler()
+        handler.emit = lambda record: captured.append(record.getMessage())
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            gesture.classify_hand(_hand((True, False, False, False, False)))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        self.assertEqual(captured, [])
 
 
 class TestGestureDebouncer(unittest.TestCase):
@@ -1678,34 +1770,67 @@ class TestGestureDebouncer(unittest.TestCase):
 
 class TestGestureSwipe(unittest.TestCase):
     def test_swipe_right_skips_forward(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2)
         tracker.feed(100.0, 0.5, 0.5)
         self.assertEqual(tracker.feed(100.1, 0.7, 0.5), "skip_forward")
 
     def test_swipe_left_skips_backward(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2)
         tracker.feed(100.0, 0.5, 0.5)
         self.assertEqual(tracker.feed(100.1, 0.2, 0.5), "skip_backward")
 
     def test_swipe_up_volume_up_big(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2)
         tracker.feed(100.0, 0.5, 0.5)
         self.assertEqual(tracker.feed(100.1, 0.5, 0.2), "volume_up_big")
 
     def test_swipe_down_volume_down_big(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2)
         tracker.feed(100.0, 0.5, 0.5)
         self.assertEqual(tracker.feed(100.1, 0.5, 0.8), "volume_down_big")
 
     def test_same_direction_does_not_repeat(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.05)
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.2, min_distance=0.1, consistency_frames=2)
         tracker.feed(100.0, 0.5, 0.5)
-        tracker.feed(100.1, 0.7, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.7, 0.5), "skip_forward")
         self.assertIsNone(tracker.feed(100.2, 0.9, 0.5))
 
-    def test_slow_motion_not_a_swipe(self):
-        tracker = gesture.SwipeTracker(window=0.5, threshold=0.3)
+    def test_slow_drift_is_not_a_swipe(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=3.0, min_distance=0.01)
         tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
+
+    def test_small_movement_is_not_a_swipe(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.01, min_distance=0.2)
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
+
+    def test_back_and_forth_oscillation_is_not_a_swipe(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.01, min_distance=0.15)
+        tracker.feed(100.0, 0.5, 0.5)
+        tracker.feed(100.1, 0.6, 0.5)
+        self.assertIsNone(tracker.feed(100.2, 0.5, 0.5))
+
+    def test_consistent_accepts_monotonic_motion(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.01, min_distance=0.01)
+        tracker.feed(100.0, 0.5, 0.5)
+        tracker.feed(100.1, 0.7, 0.5)
+        tracker.feed(100.2, 0.8, 0.5)
+        self.assertTrue(tracker._consistent("right", 0.8, 0.5))
+
+    def test_consistent_rejects_wobble(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.01, min_distance=0.01)
+        tracker.feed(100.0, 0.5, 0.5)
+        tracker.feed(100.1, 0.7, 0.5)
+        tracker.feed(100.2, 0.6, 0.5)  # snaps back left - not a consistent swipe
+        self.assertFalse(tracker._consistent("right", 0.6, 0.5))
+
+    def test_requires_consistent_direction_before_firing(self):
+        tracker = gesture.SwipeTracker(window=0.5, velocity_threshold=0.01, min_distance=0.01, consistency_frames=3)
+        tracker.feed(100.0, 0.5, 0.5)
+        tracker.feed(100.05, 0.7, 0.5)
+        # Overall the hand travelled right, but the last step wobbles the other
+        # way, so no swipe is reported for this frame.
         self.assertIsNone(tracker.feed(100.1, 0.6, 0.5))
 
 
@@ -1966,6 +2091,60 @@ class TestGestureCameraOpen(unittest.TestCase):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
             controller = gesture.GestureController()
         self.assertIsNone(controller.get_preview_frame())
+
+
+class TestGestureControllerSwipe(unittest.TestCase):
+    def _controller(self, debounce_frames=5):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            return gesture.GestureController(
+                debounce_frames=debounce_frames,
+                cooldown_seconds=0.0,
+                swipe_min_distance=0.2,
+            )
+
+    def _palm(self, x):
+        lm = _hand()
+        lm[gesture._PALM] = _Landmark(x, 0.6)
+        return lm
+
+    def _frame_cv2(self):
+        cv2 = MagicMock()
+        cv2.flip.side_effect = lambda frame, code: frame
+        cv2.cvtColor.side_effect = lambda frame, code: frame
+        return cv2
+
+    def test_swipe_fires_immediately_even_with_long_debounce(self):
+        # Regression: swipes used to go through the frame debouncer, so a single
+        # deliberate swipe was dropped unless the hand happened to hold still for
+        # debounce_frames frames. A swipe is inherently single-shot and must fire
+        # as soon as it crosses the velocity threshold.
+        controller = self._controller(debounce_frames=5)
+        controller._cap = _FakeCap([(True, _Frame()) for _ in range(8)])
+        detector = MagicMock()
+        detector.process.side_effect = [self._palm(0.5), self._palm(0.66), self._palm(0.82), None]
+        controller._detector = detector
+        controller.available = True
+        with patch.object(gesture, "cv2", self._frame_cv2()):
+            self.assertIsNone(controller.detect_gesture())
+            self.assertIsNone(controller.detect_gesture())
+            time.sleep(0.01)
+            self.assertEqual(controller.detect_gesture(), "skip_forward")
+
+    def test_swipe_does_not_fire_then_again_as_static_gesture(self):
+        controller = self._controller()
+        controller._cap = _FakeCap([(True, _Frame()) for _ in range(8)])
+        detector = MagicMock()
+        # The swipe is followed by a held open palm, which must not produce an
+        # action: an open hand is a no-op and the swing-back already fired.
+        detector.process.side_effect = [self._palm(0.5), self._palm(0.66), self._palm(0.82), self._palm(0.82)]
+        controller._detector = detector
+        controller.available = True
+        with patch.object(gesture, "cv2", self._frame_cv2()):
+            self.assertIsNone(controller.detect_gesture())
+            self.assertIsNone(controller.detect_gesture())
+            time.sleep(0.01)
+            self.assertEqual(controller.detect_gesture(), "skip_forward")
+            self.assertIsNone(controller.detect_gesture())
 
 
 class TestGestureActions(unittest.TestCase):

@@ -132,8 +132,12 @@ The gesture-to-action mapping:
 | Peace sign         | Mute / unmute        | Index + middle fingers         |
 | Pinch              | Toggle fullscreen    | Index + thumb pinch            |
 
-A gesture must be held for ~3 consecutive frames to fire, and commands are rate-limited (~0.5 s) so a quick
-motion can't double-trigger. Hold your hand up, make the shape, and move it back out of view between commands.
+Static gestures (index up, fist, thumbs, peace, pinch) must be held for ~3 consecutive frames to fire, and commands are
+rate-limited (~0.5 s) so a quick motion can't double-trigger. Hold your hand up, make the shape, and move it back out of
+view between commands. Swipes fire the instant the palm moves fast enough and far enough in one direction, so a single
+deliberate swipe is never dropped by the debouncer. To see exactly why each frame did or did not trigger, enable
+`gesture.debug` in `config.json` (or `--log-level debug`) — it prints every finger's joint angle, the thumb direction
+and the reason each gesture fired.
 
 - `--camera` selects which webcam to read (default: config `gesture.camera_id`, else `0`). The tray menu also has a
   **Next Camera** item when running in gesture tray mode. If the requested index (or backend) fails, the app
@@ -154,21 +158,31 @@ Gesture tuning lives under the `gesture` section in `config.json`:
     "camera_id": 0,
     "debounce_frames": 3,
     "cooldown_seconds": 0.5,
-    "swipe_threshold": 50,
-    "pinch_threshold": 0.05,
+    "swipe_window": 0.4,
+    "swipe_velocity_threshold": 0.5,
+    "swipe_min_distance": 0.12,
+    "swipe_consistency_frames": 3,
+    "pinch_threshold_ratio": 0.25,
+    "finger_angle_threshold": 30.0,
     "volume_interval_seconds": 0.5,
     "volume_step": 5,
+    "debug": false,
     "model_path": null
 }
 ```
 
 - `camera_id`: default webcam index (the `--camera` flag overrides it).
-- `debounce_frames`: consecutive frames a gesture must be held before it fires (default `3`).
+- `debounce_frames`: consecutive frames a static gesture must be held before it fires (default `3`).
 - `cooldown_seconds`: minimum pause between commands in seconds (default `0.5`).
-- `swipe_threshold`: distance palm movement that counts as a swipe (default `50`).
-- `pinch_threshold`: distance between thumb and index finger to count as a pinch (default `0.05`).
+- `swipe_window`: seconds of palm history considered for a swipe (default `0.4`).
+- `swipe_velocity_threshold`: minimum average palm speed, in normalized units per second, to count as a swipe (default `0.5`).
+- `swipe_min_distance`: minimum total palm travel, in normalized units of the frame, for a swipe (default `0.12`).
+- `swipe_consistency_frames`: consecutive recent samples that must all move in the dominant direction before a swipe fires, rejecting tremors and direction flips (default `3`).
+- `pinch_threshold_ratio`: a pinch is recognized when the gap between the thumb and index tips is smaller than this fraction of the hand's own size (wrist-to-palm span), so near and far hands work the same (default `0.25`).
+- `finger_angle_threshold`: a finger counts as extended only when its PIP joint opens past this angle in degrees (the straighter the finger, the wider the angle). This replaces the old tip-height rule that misread curled but raised fingers as extended (default `30.0`).
 - `volume_interval_seconds`: how often continuous volume adjustment triggers when holding thumbs up/down (default `0.5`).
 - `volume_step`: how much volume changes per step (default `5`).
+- `debug`: log per-frame finger angles and detection reasons to help tune thresholds (default `false`).
 - `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 
 ### Health check
@@ -291,7 +305,7 @@ To customize:
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
    | `voice`            | Listening timeout, phrase time limit (seconds), `energy_threshold`, plus the **noise gate** and **confidence threshold** (see below) |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
-   | `gesture`          | Gesture control: `camera_id`, `debounce_frames`, `cooldown_seconds`, `swipe_threshold`, and `model_path` (see Gesture Control) |
+   | `gesture`          | Gesture control: `camera_id`, swipe speed/distance/consistency thresholds, pinch and finger-joint thresholds, `debug`, and `model_path` (see Gesture Control) |
    | `player`           | Default skip seconds and volume step                                     |
    | `push_to_talk`     | Push-to-talk: `enabled` and the `key` to hold                             |
    | `keyboard_fallback` | Whether keyboard fallback is allowed, and the shortcut keys              |
@@ -638,7 +652,7 @@ quick testing. Use `--no-wake` to get the same behavior explicitly.
   warning when frames are constant/black); press `q` to exit. If the raw preview is black too, the webcam is busy
   (closed by another app), privacy-blurred, or index 0 isn't your webcam — try `--camera 1`, `--camera 2`, etc.,
   or in tray mode use the **Next Camera** menu item.
-- **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time.
+- **Gestures are flaky / wrong commands fire** → Hold each gesture still for about half a second so the debounce registers it, keep your hand roughly centered in view and well-lit, and move it fully out of frame between commands. Use `--show-preview` to see which gesture is being detected in real time, or set `gesture.debug` to `true` to log why each frame did or didn't fire. Seen in real use: a thumb tucked in along the side of the hand used to read as "up", a pinch with additional fingers open was still a pinch, and reads of a curled-but-raised ring finger flipped "play/pause" into "stop". Fingers are now judged by their PIP joint angle, the thumb by its angle around the hand, pinch by a hand-relative distance, and swipes by speed plus direction consistency — tune those via the `gesture.*` thresholds above.
 - **`VLC HTTP not responding`** → Make sure VLC is running and the web interface is enabled: Tools → Preferences → Show all settings → Interface → Main interfaces → Web. Check the port and password in `config.json`.
 - **`MPC-HC HTTP not responding`** → Enable the web interface under View → Options → Player → Web Interface and tick "Listen on port" (13579).
 - **`Permission denied` on keyboard** → Global key simulation needs elevated rights on Windows. Run the terminal as Administrator, or rely on HTTP control.

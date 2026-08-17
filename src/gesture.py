@@ -73,11 +73,11 @@ SWIPE_ACTIONS = {
 # MediaPipe hand-landmark indices referenced below.
 _WRIST = 0
 _THUMB_CMC, _THUMB_MCP, _THUMB_IP, _THUMB_TIP = 1, 2, 3, 4
-_INDEX_MCP, _INDEX_PIP, _INDEX_TIP = 5, 6, 8
-_MIDDLE_PIP, _MIDDLE_TIP = 10, 12
-_RING_PIP, _RING_TIP = 14, 16
-_PINKY_PIP, _PINKY_TIP = 18, 20
-_PALM = 9
+_INDEX_MCP, _INDEX_PIP, _INDEX_DIP, _INDEX_TIP = 5, 6, 7, 8
+_MIDDLE_MCP, _MIDDLE_PIP, _MIDDLE_DIP, _MIDDLE_TIP = 9, 10, 11, 12
+_RING_MCP, _RING_PIP, _RING_DIP, _RING_TIP = 13, 14, 15, 16
+_PINKY_MCP, _PINKY_PIP, _PINKY_DIP, _PINKY_TIP = 17, 18, 19, 20
+_PALM = _MIDDLE_MCP
 
 # Standard MediaPipe hand skeleton topology, used for the preview overlay.
 HAND_CONNECTIONS = (
@@ -200,20 +200,55 @@ def open_camera(camera_id: int = 0):
     return None
 
 
-def count_extended_fingers(landmarks) -> list[bool]:
+def _angle_degrees(vertex, a, b) -> float:
+    """Return the angle (0..180 degrees) at ``vertex`` between points ``a`` and ``b``.
+
+    Computed from the vectors ``vertex -> a`` and ``vertex -> b`` via the dot
+    product, so the result is independent of the hand's position and rotation
+    (normalized landmark coordinates are fine; the metric is scale-invariant).
+    """
+    vx1 = a.x - vertex.x
+    vy1 = a.y - vertex.y
+    vx2 = b.x - vertex.x
+    vy2 = b.y - vertex.y
+    n1 = math.hypot(vx1, vy1)
+    n2 = math.hypot(vx2, vy2)
+    if n1 < 1e-9 or n2 < 1e-9:
+        return 180.0
+    cos_a = max(-1.0, min(1.0, (vx1 * vx2 + vy1 * vy2) / (n1 * n2)))
+    return math.degrees(math.acos(cos_a))
+
+
+def finger_extended(landmarks, tip_idx, pip_idx, mcp_idx, dip_idx, threshold_angle: float = 30.0) -> bool:
+    """Return True when a long finger counts as extended.
+
+    Measures the angle at the PIP joint formed by the MCP, PIP and DIP points.
+    For a straight finger that angle is close to 180 degrees; when the finger
+    curls into the palm it drops well below it. A finger is "extended" when the
+    joint is within ``threshold_angle`` degrees of straight - so a finger that
+    is only slightly raised (e.g. the ring finger while pointing) no longer
+    counts, unlike a plain tip-vs-PIP height comparison.
+    """
+    angle = _angle_degrees(landmarks[pip_idx], landmarks[mcp_idx], landmarks[dip_idx])
+    return angle >= 180.0 - max(0.0, min(180.0, threshold_angle))
+
+
+def count_extended_fingers(landmarks, finger_angle_threshold: float = 30.0) -> list[bool]:
     """Return [thumb, index, middle, ring, pinky] extended booleans.
 
     `landmarks` is a sequence of objects with normalized ``.x`` and ``.y``
     attributes (0..1, y grows downward) as produced by MediaPipe.
 
-    The index-to-pinky fingers count as extended when their tip is above their
-    PIP joint. The thumb uses a rotation-independent distance test to the index
-    MCP joint, which works for both palms and either handedness.
+    The index-to-pinky fingers use the rotation-independent angle at the PIP
+    joint (see :func:`finger_extended`). The thumb uses a rotation-independent
+    distance test to the index MCP joint, which works for both palms and either
+    handedness.
     """
-    index = landmarks[_INDEX_TIP].y < landmarks[_INDEX_PIP].y
-    middle = landmarks[_MIDDLE_TIP].y < landmarks[_MIDDLE_PIP].y
-    ring = landmarks[_RING_TIP].y < landmarks[_RING_PIP].y
-    pinky = landmarks[_PINKY_TIP].y < landmarks[_PINKY_PIP].y
+    threshold = max(0.0, min(180.0, finger_angle_threshold))
+    index = finger_extended(landmarks, _INDEX_TIP, _INDEX_PIP, _INDEX_MCP, _INDEX_DIP, threshold)
+    middle = finger_extended(landmarks, _MIDDLE_TIP, _MIDDLE_PIP, _MIDDLE_MCP, _MIDDLE_DIP, threshold)
+    ring = finger_extended(landmarks, _RING_TIP, _RING_PIP, _RING_MCP, _RING_DIP, threshold)
+    pinky = finger_extended(landmarks, _PINKY_TIP, _PINKY_PIP, _PINKY_MCP, _PINKY_DIP, threshold)
 
     ix = landmarks[_INDEX_MCP].x
     iy = landmarks[_INDEX_MCP].y
@@ -223,36 +258,114 @@ def count_extended_fingers(landmarks) -> list[bool]:
     return [thumb, index, middle, ring, pinky]
 
 
-def classify_hand(landmarks, pinch_threshold: float = 0.05) -> str | None:
+def classify_thumb_direction(landmarks) -> str | None:
+    """Return ``"up"`` or ``"down"`` for an extended thumb, or None.
+
+    The hand's vertical axis runs from the wrist to the middle-finger MCP (the
+    direction the fingers point along). The thumb vector (IP -> tip) is compared
+    to that axis: aligned means "thumbs up", anti-aligned means "thumbs down".
+    Comparing the thumb to the hand's own axis - rather than to the image's
+    vertical - keeps the classification correct when the hand is tilted or
+    rotated. A thumb pointing roughly perpendicular to the axis (>70 degrees
+    from it) is ambiguous and returns None.
+    """
+    hx = landmarks[_PALM].x - landmarks[_WRIST].x
+    hy = landmarks[_PALM].y - landmarks[_WRIST].y
+    tx = landmarks[_THUMB_TIP].x - landmarks[_THUMB_IP].x
+    ty = landmarks[_THUMB_TIP].y - landmarks[_THUMB_IP].y
+    hn = math.hypot(hx, hy)
+    tn = math.hypot(tx, ty)
+    if hn < 1e-9 or tn < 1e-9:
+        return None
+    cos_a = max(-1.0, min(1.0, (hx * tx + hy * ty) / (hn * tn)))
+    if cos_a > 0.2:
+        return "up"
+    if cos_a < -0.2:
+        return "down"
+    return None
+
+
+def _relative_pinch_distance(landmarks) -> float:
+    """Gap between the thumb and index tips, normalized by the hand span.
+
+    Hand span is the wrist -> middle-MCP distance, so the ratio stays stable as
+    the hand moves closer to or further from the camera (both the span and the
+    gap shrink together) instead of needing an absolute pixel threshold.
+    """
+    span = math.hypot(landmarks[_PALM].x - landmarks[_WRIST].x,
+                      landmarks[_PALM].y - landmarks[_WRIST].y)
+    if span < 1e-6:
+        return 1.0
+    d = math.hypot(landmarks[_THUMB_TIP].x - landmarks[_INDEX_TIP].x,
+                   landmarks[_THUMB_TIP].y - landmarks[_INDEX_TIP].y)
+    return d / span
+
+
+def _debug_finger_report(landmarks, ext, threshold) -> None:
+    """Log the joint angles and extension verdicts behind a classification."""
+    fingers = ("index", "middle", "ring", "pinky")
+    for name, tip, pip, mcp, dip in zip(
+        fingers,
+        (_INDEX_TIP, _MIDDLE_TIP, _RING_TIP, _PINKY_TIP),
+        (_INDEX_PIP, _MIDDLE_PIP, _RING_PIP, _PINKY_PIP),
+        (_INDEX_MCP, _MIDDLE_MCP, _RING_MCP, _PINKY_MCP),
+        (_INDEX_DIP, _MIDDLE_DIP, _RING_DIP, _PINKY_DIP),
+    ):
+        angle = _angle_degrees(landmarks[pip], landmarks[mcp], landmarks[dip])
+        logger.debug(
+            "%s finger: PIP angle=%.1fdeg (extended=%s)",
+            name, angle, "yes" if angle >= 180.0 - threshold else "no",
+        )
+    logger.debug("thumb: extended=%s", "yes" if ext[0] else "no")
+
+
+def classify_hand(
+    landmarks,
+    pinch_threshold_ratio: float = 0.25,
+    finger_angle_threshold: float = 30.0,
+    debug: bool = False,
+) -> str | None:
     """Classify a hand shape into an action string, or None if unrecognized.
 
     Gesture mapping:
     - index finger only -> ``play_pause`` (toggle)
-    - thumb only (pointing up/down) -> ``volume_up`` / ``volume_down`` (continuous)
-    - index + thumb pinched close together -> ``toggle_fullscreen``
-    - thumb + index close within ``pinch_threshold`` normalized units counts as a pinch
-    - fist -> ``stop`` (legacy)
-    - peace sign -> ``toggle_mute`` (legacy)
+    - thumb only (pointing along/against the hand axis) -> ``volume_up`` /
+      ``volume_down`` (continuous)
+    - index + thumb pinched together (only those two extended) ->
+      ``toggle_fullscreen``; the tip gap is compared against ``pinch_threshold_ratio``
+      fractions of the hand span rather than an absolute distance
+    - fist -> ``stop``
+    - peace sign -> ``toggle_mute``
 
+    Finger extension uses the PIP-joint angle (see :func:`count_extended_fingers`)
+    with ``finger_angle_threshold`` degrees of allowed curvature. With ``debug``
+    enabled the joint angles and verdicts are logged so thresholds can be tuned.
     A fully-open hand returns None: the open-hand swipes are handled by
     ``SwipeTracker`` so a stationary open palm deliberately fires nothing.
     """
-    ext = count_extended_fingers(landmarks)
+    threshold = max(0.0, min(180.0, finger_angle_threshold))
+    ext = count_extended_fingers(landmarks, threshold)
+    if debug:
+        _debug_finger_report(landmarks, ext, threshold)
+
     if not any(ext):
         return "stop"                        # Closed fist -> stop
     if ext[0] and ext[1] and not ext[2] and not ext[3] and not ext[4]:
-        tip = landmarks[_THUMB_TIP]
-        index = landmarks[_INDEX_TIP]
-        d_pinch = math.hypot(tip.x - index.x, tip.y - index.y)
-        if d_pinch < pinch_threshold:
+        ratio = _relative_pinch_distance(landmarks)
+        if debug:
+            logger.debug("Pinch candidate: tip gap=%d%% of hand span (threshold %.0f%%)",
+                         round(ratio * 100), round(pinch_threshold_ratio * 100))
+        if ratio < pinch_threshold_ratio:
             return "toggle_fullscreen"       # Pinch -> fullscreen toggle
     if ext[1] and not ext[0] and not ext[2] and not ext[3] and not ext[4]:
         return "play_pause"                  # Index finger only -> play/pause toggle
     if ext[0] and not any(ext[1:]):
-        wrist_y = landmarks[_WRIST].y
-        if landmarks[_THUMB_TIP].y < wrist_y:
+        direction = classify_thumb_direction(landmarks)
+        if debug:
+            logger.debug("Thumb-only: relative direction=%s", direction)
+        if direction == "up":
             return "volume_up"               # Thumbs up -> volume up (continuous)
-        if landmarks[_THUMB_TIP].y > wrist_y:
+        if direction == "down":
             return "volume_down"             # Thumbs down -> volume down (continuous)
         return None
     if ext[1] and ext[2] and not ext[3] and not ext[4]:
@@ -420,17 +533,36 @@ class Debouncer:
 
 
 class SwipeTracker:
-    """Detect directional hand swipes from a rolling position history.
+    """Detect deliberate directional hand swipes from a rolling palm history.
 
-    Feeds timed (x, y) palm positions. A swipe fires once per stroke: the
-    speed must exceed `threshold` across the `window`, and the next swipe in the
-    same direction is only reported after the hand slows down again.
+    A swipe must satisfy all three conditions to fire (rejecting small jitters,
+    tremors and direction flips that a plain distance check would swallow):
+
+    - the palm travelled at least ``min_distance`` normalized units,
+    - its average speed over the window is at least ``velocity_threshold``
+      normalized units per second,
+    - the most recent ``consistency_frames`` samples all moved toward the latest
+      position in the same dominant direction.
+
+    A swipe fires once per stroke: after firing, the same direction is not
+    reported again until the hand slows back down below the thresholds.
     """
 
-    def __init__(self, window: float = 0.5, threshold: float = 0.12):
+    _TOLERANCE = 0.005  # allowed landmark wobble against the dominant axis
+
+    def __init__(
+        self,
+        window: float = 0.4,
+        velocity_threshold: float = 0.5,
+        min_distance: float = 0.12,
+        consistency_frames: int = 3,
+        threshold: float | None = None,
+    ):
         self.window = max(0.05, window)
-        self.threshold = max(0.01, threshold)
-        self._history = deque(maxlen=60)
+        self.velocity_threshold = max(0.01, threshold if threshold is not None else velocity_threshold)
+        self.min_distance = max(0.005, min_distance)
+        self.consistency_frames = max(2, int(consistency_frames))
+        self._history = deque(maxlen=64)
         self._stroke = None
         self._ignore_static_until = 0.0
 
@@ -442,23 +574,53 @@ class SwipeTracker:
         """True shortly after a swipe, so the held hand pose isn't also fired."""
         return now < self._ignore_static_until
 
+    def _consistent(self, direction: str, cx: float, cy: float) -> bool:
+        """True when the recent samples kept moving toward (cx, cy) in `direction`.
+
+        For a horizontal swipe the current x must be greater (or smaller) than
+        every recent sample's x; the same applies to y for vertical swipes. A
+        tiny backwards wobble within ``_TOLERANCE`` is accepted so single-frame
+        landmark jitter doesn't kill a real swipe.
+        """
+        check_x = direction in ("left", "right")
+        sign = 1.0 if direction in ("right", "down") else -1.0
+        samples = list(self._history)[-(self.consistency_frames + 1):-1]
+        if not samples:
+            return True
+        for _, x, y in samples:
+            delta = ((cx - x) if check_x else (cy - y)) * sign
+            if delta < -self._TOLERANCE:
+                return False
+        return True
+
     def feed(self, now: float, cx: float, cy: float) -> str | None:
         self._history.append((now, cx, cy))
         while self._history and self._history[0][0] < now - self.window:
             self._history.popleft()
         if len(self._history) < 2:
             return None
-        x0, y0 = self._history[0][1], self._history[0][2]
-        dx = cx - x0
-        dy = cy - y0
-        speed = math.hypot(dx, dy)
-        if speed < self.threshold:
+
+        first_t, first_x, first_y = self._history[0]
+        elapsed = now - first_t
+        dx = cx - first_x
+        dy = cy - first_y
+        distance = math.hypot(dx, dy)
+        velocity = distance / elapsed if elapsed > 0 else 0.0
+
+        # The hand is (mostly) at rest: allow the next stroke in the same
+        # direction to fire again.
+        if distance < self.min_distance or velocity < self.velocity_threshold:
             self._stroke = None
             return None
+
         if abs(dx) >= abs(dy):
             direction = "left" if dx < 0 else "right"
         else:
             direction = "up" if dy < 0 else "down"
+
+        if not self._consistent(direction, cx, cy):
+            return None
+
         if direction == self._stroke:
             return None
         self._stroke = direction
@@ -482,8 +644,13 @@ class GestureController:
         debounce_frames: int = 3,
         cooldown_seconds: float = 0.5,
         model_path: str | os.PathLike | None = None,
-        swipe_threshold: float | None = None,
-        pinch_threshold: float = 0.05,
+        swipe_window: float | None = None,
+        swipe_velocity_threshold: float = 0.5,
+        swipe_min_distance: float = 0.12,
+        swipe_consistency_frames: int = 3,
+        pinch_threshold_ratio: float = 0.25,
+        finger_angle_threshold: float = 30.0,
+        gesture_debug: bool = False,
         volume_interval_seconds: float = 0.5,
         volume_step: int = 5,
         volume_provider=None,
@@ -493,7 +660,9 @@ class GestureController:
         self.debounce_frames = max(1, debounce_frames)
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self.model_path = model_path
-        self.pinch_threshold = max(0.005, pinch_threshold)
+        self.pinch_threshold_ratio = max(0.01, pinch_threshold_ratio)
+        self.finger_angle_threshold = max(0.0, min(180.0, finger_angle_threshold))
+        self.gesture_debug = bool(gesture_debug)
         self.volume_interval_seconds = max(0.1, volume_interval_seconds)
         self.volume_step = max(1, int(volume_step))
         self.available = False
@@ -509,8 +678,11 @@ class GestureController:
         self._thread = None
         self._paused = False
         self._debouncer = Debouncer(self.debounce_frames, self.cooldown_seconds)
-        self._swipes = (
-            SwipeTracker(threshold=swipe_threshold) if swipe_threshold is not None else SwipeTracker()
+        self._swipes = SwipeTracker(
+            window=swipe_window if swipe_window is not None else 0.4,
+            velocity_threshold=swipe_velocity_threshold,
+            min_distance=swipe_min_distance,
+            consistency_frames=swipe_consistency_frames,
         )
         self._cap = None
         self._detector = None
@@ -721,7 +893,12 @@ class GestureController:
             if swipe:
                 action = swipe
             elif not self._swipes.ignore_static(now):
-                action = classify_hand(landmarks, pinch_threshold=self.pinch_threshold)
+                action = classify_hand(
+                    landmarks,
+                    pinch_threshold_ratio=self.pinch_threshold_ratio,
+                    finger_angle_threshold=self.finger_angle_threshold,
+                    debug=self.gesture_debug,
+                )
         self._annotate_frame(frame, landmarks, action)
         if self.show_preview:
             draw_volume_bar(frame, self._current_volume())
@@ -784,18 +961,24 @@ class GestureController:
         palm = landmarks[_PALM]
         swipe = self._swipes.feed(now, palm.x, palm.y)
         if swipe:
+            # Swipes are inherently single-shot (SwipeTracker fires once per
+            # stroke), so they fire immediately instead of going through the
+            # frame debouncer, which would swallow the single event.
             self._volume_hold_action = None
             self._volume_next_at = 0.0
             self._draw_preview(frame, landmarks, swipe)
-            action = self._debouncer.feed(swipe)
-            if action:
-                self.last_action = action
-                logger.info("Detected swipe: %s", action)
-            return action
+            self.last_action = swipe
+            logger.info("Detected swipe: %s", swipe)
+            return swipe
 
         action = None
         if not self._swipes.ignore_static(now):
-            action = classify_hand(landmarks, pinch_threshold=self.pinch_threshold)
+            action = classify_hand(
+                landmarks,
+                pinch_threshold_ratio=self.pinch_threshold_ratio,
+                finger_angle_threshold=self.finger_angle_threshold,
+                debug=self.gesture_debug,
+            )
         self._draw_preview(frame, landmarks, action)
 
         if action in ("volume_up", "volume_down"):
@@ -803,6 +986,10 @@ class GestureController:
             if self._volume_hold_action != action:
                 self._volume_hold_action = action
                 self._volume_next_at = 0.0
+            if action == "volume_up" and self._current_volume() >= 100:
+                return None
+            if action == "volume_down" and self._current_volume() <= 0:
+                return None
             if now < self._volume_next_at:
                 return None
             self._volume_next_at = now + self.volume_interval_seconds
