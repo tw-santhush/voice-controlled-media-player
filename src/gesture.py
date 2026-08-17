@@ -219,7 +219,7 @@ def _angle_degrees(vertex, a, b) -> float:
     return math.degrees(math.acos(cos_a))
 
 
-def finger_extended(landmarks, tip_idx, pip_idx, mcp_idx, dip_idx, threshold_angle: float = 30.0) -> bool:
+def finger_extended(landmarks, tip_idx, pip_idx, mcp_idx, dip_idx, threshold_angle: float = 25.0) -> bool:
     """Return True when a long finger counts as extended.
 
     Measures the angle at the PIP joint formed by the MCP, PIP and DIP points.
@@ -233,7 +233,7 @@ def finger_extended(landmarks, tip_idx, pip_idx, mcp_idx, dip_idx, threshold_ang
     return angle >= 180.0 - max(0.0, min(180.0, threshold_angle))
 
 
-def count_extended_fingers(landmarks, finger_angle_threshold: float = 30.0) -> list[bool]:
+def count_extended_fingers(landmarks, finger_angle_threshold: float = 25.0) -> list[bool]:
     """Return [thumb, index, middle, ring, pinky] extended booleans.
 
     `landmarks` is a sequence of objects with normalized ``.x`` and ``.y``
@@ -258,16 +258,22 @@ def count_extended_fingers(landmarks, finger_angle_threshold: float = 30.0) -> l
     return [thumb, index, middle, ring, pinky]
 
 
-def classify_thumb_direction(landmarks) -> str | None:
+def classify_thumb_direction(landmarks, cos_threshold: float = 0.2, y_threshold: float = 0.15) -> str | None:
     """Return ``"up"`` or ``"down"`` for an extended thumb, or None.
 
-    The hand's vertical axis runs from the wrist to the middle-finger MCP (the
-    direction the fingers point along). The thumb vector (IP -> tip) is compared
-    to that axis: aligned means "thumbs up", anti-aligned means "thumbs down".
-    Comparing the thumb to the hand's own axis - rather than to the image's
-    vertical - keeps the classification correct when the hand is tilted or
-    rotated. A thumb pointing roughly perpendicular to the axis (>70 degrees
-    from it) is ambiguous and returns None.
+    Two independent cues decide the direction:
+
+    1. Orientation-independent: the thumb vector (IP -> tip) is compared to the
+       hand's own axis (wrist -> middle MCP), which is the direction the fingers
+       point along compared to the image vertical keeps the classification
+       correct when the hand is tilted or rotated.
+    2. Fallback: the vertical component of the thumb vector, normalized by the
+       hand span. This is used when the axis comparison is ambiguous (a thumb
+       pointing roughly perpendicular to the hand axis, e.g. a sideways hand)
+       or the hand axis is too short to measure (tight fist). A thumb tip well
+       above its IP joint means "up"; well below means "down".
+
+    A thumb pointing roughly across the hand's own vertical returns None.
     """
     hx = landmarks[_PALM].x - landmarks[_WRIST].x
     hy = landmarks[_PALM].y - landmarks[_WRIST].y
@@ -275,13 +281,18 @@ def classify_thumb_direction(landmarks) -> str | None:
     ty = landmarks[_THUMB_TIP].y - landmarks[_THUMB_IP].y
     hn = math.hypot(hx, hy)
     tn = math.hypot(tx, ty)
-    if hn < 1e-9 or tn < 1e-9:
-        return None
-    cos_a = max(-1.0, min(1.0, (hx * tx + hy * ty) / (hn * tn)))
-    if cos_a > 0.2:
-        return "up"
-    if cos_a < -0.2:
-        return "down"
+    if hn >= 1e-9 and tn >= 1e-9:
+        cos_a = max(-1.0, min(1.0, (hx * tx + hy * ty) / (hn * tn)))
+        if cos_a > cos_threshold:
+            return "up"
+        if cos_a < -cos_threshold:
+            return "down"
+    if hn >= 1e-6 and tn >= 1e-9:
+        dy = (landmarks[_THUMB_TIP].y - landmarks[_THUMB_IP].y) / hn
+        if dy <= -y_threshold:
+            return "up"
+        if dy >= y_threshold:
+            return "down"
     return None
 
 
@@ -317,12 +328,17 @@ def _debug_finger_report(landmarks, ext, threshold) -> None:
             name, angle, "yes" if angle >= 180.0 - threshold else "no",
         )
     logger.debug("thumb: extended=%s", "yes" if ext[0] else "no")
+    logger.debug(
+        "Extended fingers: %s (count=%d)",
+        [bool(f) for f in ext],
+        sum(1 for f in ext if f),
+    )
 
 
 def classify_hand(
     landmarks,
-    pinch_threshold_ratio: float = 0.25,
-    finger_angle_threshold: float = 30.0,
+    pinch_threshold_ratio: float = 0.12,
+    finger_angle_threshold: float = 25.0,
     debug: bool = False,
 ) -> str | None:
     """Classify a hand shape into an action string, or None if unrecognized.
@@ -349,28 +365,35 @@ def classify_hand(
         _debug_finger_report(landmarks, ext, threshold)
 
     if not any(ext):
-        return "stop"                        # Closed fist -> stop
-    if ext[0] and ext[1] and not ext[2] and not ext[3] and not ext[4]:
+        action, reason = "stop", "closed fist"                 # Closed fist -> stop
+    elif ext[0] and ext[1] and not ext[2] and not ext[3] and not ext[4]:
         ratio = _relative_pinch_distance(landmarks)
         if debug:
             logger.debug("Pinch candidate: tip gap=%d%% of hand span (threshold %.0f%%)",
                          round(ratio * 100), round(pinch_threshold_ratio * 100))
         if ratio < pinch_threshold_ratio:
-            return "toggle_fullscreen"       # Pinch -> fullscreen toggle
-    if ext[1] and not ext[0] and not ext[2] and not ext[3] and not ext[4]:
-        return "play_pause"                  # Index finger only -> play/pause toggle
-    if ext[0] and not any(ext[1:]):
+            action, reason = "toggle_fullscreen", "pinch"      # Pinch -> fullscreen toggle
+        else:
+            action, reason = None, "pinch candidate but tips not close enough"
+    elif ext[1] and not ext[0] and not ext[2] and not ext[3] and not ext[4]:
+        action, reason = "play_pause", "index finger only"     # Index only -> play/pause
+    elif ext[0] and not any(ext[1:]):
         direction = classify_thumb_direction(landmarks)
         if debug:
             logger.debug("Thumb-only: relative direction=%s", direction)
         if direction == "up":
-            return "volume_up"               # Thumbs up -> volume up (continuous)
-        if direction == "down":
-            return "volume_down"             # Thumbs down -> volume down (continuous)
-        return None
-    if ext[1] and ext[2] and not ext[3] and not ext[4]:
-        return "toggle_mute"                 # Peace sign -> mute/unmute
-    return None
+            action, reason = "volume_up", "thumb only (up)"    # Thumbs up -> volume up
+        elif direction == "down":
+            action, reason = "volume_down", "thumb only (down)"  # Thumbs down -> volume down
+        else:
+            action, reason = None, "thumb only but direction ambiguous"
+    elif ext[1] and ext[2] and not ext[3] and not ext[4]:
+        action, reason = "toggle_mute", "peace sign"           # Peace sign -> mute/unmute
+    else:
+        action, reason = None, "no matching shape"
+    if debug:
+        logger.debug("Classification: %s (%s)", action, reason)
+    return action
 
 
 def draw_volume_bar(frame, percent, show_label: bool = True) -> None:
@@ -578,7 +601,7 @@ class SwipeTracker:
         self,
         window: float = 0.4,
         velocity_threshold: float = 0.5,
-        min_distance: float = 0.12,
+        min_distance: float = 0.25,
         consistency_frames: int = 3,
         threshold: float | None = None,
     ):
@@ -671,10 +694,10 @@ class GestureController:
         model_path: str | os.PathLike | None = None,
         swipe_window: float | None = None,
         swipe_velocity_threshold: float = 0.5,
-        swipe_min_distance: float = 0.12,
+        swipe_min_distance: float = 0.25,
         swipe_consistency_frames: int = 3,
-        pinch_threshold_ratio: float = 0.25,
-        finger_angle_threshold: float = 30.0,
+        pinch_threshold_ratio: float = 0.12,
+        finger_angle_threshold: float = 25.0,
         gesture_debug: bool = False,
         volume_interval_seconds: float = 0.5,
         volume_step: int = 5,
@@ -1039,6 +1062,8 @@ class GestureController:
                 finger_angle_threshold=self.finger_angle_threshold,
                 debug=self.gesture_debug,
             )
+        if self.gesture_debug:
+            logger.debug("Raw classification (pre-debounce): %s", action)
         self._draw_preview(frame, landmarks, action)
 
         if action in ("volume_up", "volume_down"):

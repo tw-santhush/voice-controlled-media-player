@@ -1758,7 +1758,16 @@ class TestGestureRecognition(unittest.TestCase):
         text = "\n".join(cm.output)
         self.assertIn("thumb: extended=yes", text)
         self.assertIn("index finger: PIP angle", text)
+        self.assertIn("Extended fingers: [True, False, False, False, False] (count=1)", text)
         self.assertIn("Thumb-only: relative direction=up", text)
+        self.assertIn("Classification: volume_up", text)
+
+    def test_classify_hand_debug_logs_play_pause_reason(self):
+        lm = _hand((False, True, False, False, False))
+        with self.assertLogs("gesture", level="DEBUG") as cm:
+            gesture.classify_hand(lm, debug=True)
+        text = "\n".join(cm.output)
+        self.assertIn("Classification: play_pause (index finger only)", text)
 
     def test_classify_hand_no_debug_log_by_default(self):
         import logging
@@ -1776,6 +1785,32 @@ class TestGestureRecognition(unittest.TestCase):
             logger.removeHandler(handler)
             logger.setLevel(previous_level)
         self.assertEqual(captured, [])
+
+    def test_thumb_direction_y_fallback_up_when_axis_ambiguous(self):
+        # Sideways hand: the hand axis is horizontal and the thumb points
+        # straight up, so the axis dot-product is ~0 (ambiguous). The y-position
+        # fallback must decide "up".
+        lm = _hand((True, False, False, False, False))
+        lm[gesture._PALM] = _Landmark(0.70, 0.85)
+        lm[gesture._THUMB_IP] = _Landmark(0.70, 0.80)
+        lm[gesture._THUMB_TIP] = _Landmark(0.70, 0.70)
+        self.assertEqual(gesture.classify_thumb_direction(lm), "up")
+
+    def test_thumb_direction_y_fallback_down_when_axis_ambiguous(self):
+        lm = _hand((True, False, False, False, False))
+        lm[gesture._PALM] = _Landmark(0.70, 0.85)
+        lm[gesture._THUMB_IP] = _Landmark(0.70, 0.80)
+        lm[gesture._THUMB_TIP] = _Landmark(0.70, 0.95)
+        self.assertEqual(gesture.classify_thumb_direction(lm), "down")
+
+    def test_thumb_direction_returns_none_when_ambiguous(self):
+        # Thumb barely off horizontal while the hand axis is horizontal too:
+        # the dot-product and the (tiny) y-component are both indeterminate.
+        lm = _hand((True, False, False, False, False))
+        lm[gesture._PALM] = _Landmark(0.70, 0.85)
+        lm[gesture._THUMB_IP] = _Landmark(0.75, 0.80)
+        lm[gesture._THUMB_TIP] = _Landmark(0.75, 0.78)
+        self.assertIsNone(gesture.classify_thumb_direction(lm))
 
 
 class TestGestureDebouncer(unittest.TestCase):
@@ -1979,6 +2014,12 @@ class TestGestureSetup(unittest.TestCase):
         self.assertIn("tray", config_loader.DEFAULT_CONFIG)
         self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["enabled"], False)
         self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["auto_start"], False)
+
+    def test_default_config_gesture_thresholds_are_tuned(self):
+        g = config_loader.DEFAULT_CONFIG["gesture"]
+        self.assertEqual(g["finger_angle_threshold"], 25)
+        self.assertEqual(g["pinch_threshold_ratio"], 0.12)
+        self.assertEqual(g["swipe_min_distance"], 0.25)
 
     def test_load_config_merges_missing_tray_section(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2223,6 +2264,24 @@ class TestGestureCameraOpen(unittest.TestCase):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
             controller = gesture.GestureController()
         self.assertIsNone(controller.get_preview_frame())
+
+    def test_detect_gesture_logs_raw_classification_in_debug(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController(gesture_debug=True)
+        controller._cap = _FakeCap([(True, _Frame())])
+        detector = MagicMock()
+        detector.process.return_value = _hand()
+        controller._detector = detector
+        controller.available = True
+        cv2 = MagicMock()
+        cv2.flip.side_effect = lambda frame, code: frame
+        cv2.cvtColor.side_effect = lambda frame, code: frame
+        with patch.object(gesture, "cv2", cv2):
+            with self.assertLogs("gesture", level="DEBUG") as cm:
+                self.assertIsNone(controller.detect_gesture())
+        text = "\n".join(cm.output)
+        self.assertIn("Raw classification (pre-debounce): None", text)
+        self.assertIn("Classification: None (no matching shape)", text)
 
 
 class TestGestureControllerSwipe(unittest.TestCase):

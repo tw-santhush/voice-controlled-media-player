@@ -1184,6 +1184,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Enable verbose DEBUG logging and microphone diagnostics",
     )
     parser.add_argument(
+        "--gesture-debug",
+        action="store_true",
+        help="Enable verbose gesture classification logging and relax detection "
+        "thresholds (debounce/cooldown/volume interval) for tuning",
+    )
+    parser.add_argument(
         "--tts-engine",
         choices=["auto", "pyttsx3", "powershell", "say", "espeak", "system"],
         default=None,
@@ -1434,39 +1440,67 @@ def main(argv: list[str] | None = None) -> None:
 
     gesture_cfg = getattr(cfg, "gesture", None) if use_gesture else None
 
+    gesture_debug = args.gesture_debug or bool(
+        getattr(gesture_cfg, "debug", False) if gesture_cfg else False
+    )
+    if args.gesture_debug:
+        # Make the gesture classification debug logs visible on the console
+        # even without --debug (the root console handler only forwards INFO+).
+        gesture_logger = logging.getLogger("gesture")
+        gesture_logger.setLevel(logging.DEBUG)
+        console = logging.StreamHandler()
+        console.setLevel(logging.DEBUG)
+        console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        gesture_logger.addHandler(console)
+        log.info("Gesture debug mode enabled: verbose classification logs + relaxed thresholds")
+
     camera_id = args.camera
     if camera_id is None:
         camera_id = getattr(gesture_cfg, "camera_id", 0) if gesture_cfg else 0
     camera_id = int(camera_id)
 
+    debounce_frames = (
+        1
+        if args.gesture_debug
+        else getattr(gesture_cfg, "debounce_frames", 3) if gesture_cfg else 3
+    )
+    cooldown_seconds = (
+        0.2
+        if args.gesture_debug
+        else getattr(gesture_cfg, "cooldown_seconds", 0.5) if gesture_cfg else 0.5
+    )
+    volume_interval_seconds = (
+        0.2
+        if args.gesture_debug
+        else getattr(gesture_cfg, "volume_interval_seconds", 0.5) if gesture_cfg else 0.5
+    )
+
     gesture = (
         GestureController(
             camera_id=camera_id,
             show_preview=args.show_preview,
-            debounce_frames=getattr(gesture_cfg, "debounce_frames", 3) if gesture_cfg else 3,
-            cooldown_seconds=getattr(gesture_cfg, "cooldown_seconds", 0.5) if gesture_cfg else 0.5,
+            debounce_frames=debounce_frames,
+            cooldown_seconds=cooldown_seconds,
             model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
             swipe_window=getattr(gesture_cfg, "swipe_window", None) if gesture_cfg else None,
             swipe_velocity_threshold=(
                 getattr(gesture_cfg, "swipe_velocity_threshold", 0.5) if gesture_cfg else 0.5
             ),
             swipe_min_distance=(
-                getattr(gesture_cfg, "swipe_min_distance", 0.12) if gesture_cfg else 0.12
+                getattr(gesture_cfg, "swipe_min_distance", 0.25) if gesture_cfg else 0.25
             ),
             swipe_consistency_frames=(
                 getattr(gesture_cfg, "swipe_consistency_frames", 3) if gesture_cfg else 3
             ),
             pinch_threshold_ratio=(
-                getattr(gesture_cfg, "pinch_threshold_ratio", 0.25) if gesture_cfg else 0.25
+                getattr(gesture_cfg, "pinch_threshold_ratio", 0.12) if gesture_cfg else 0.12
             ),
             finger_angle_threshold=(
-                getattr(gesture_cfg, "finger_angle_threshold", 30.0) if gesture_cfg else 30.0
+                getattr(gesture_cfg, "finger_angle_threshold", 25) if gesture_cfg else 25
             ),
-            gesture_debug=getattr(gesture_cfg, "debug", False) if gesture_cfg else False,
+            gesture_debug=gesture_debug,
             show_feedback=getattr(gesture_cfg, "show_feedback", True) if gesture_cfg else True,
-            volume_interval_seconds=(
-                getattr(gesture_cfg, "volume_interval_seconds", 0.5) if gesture_cfg else 0.5
-            ),
+            volume_interval_seconds=volume_interval_seconds,
             volume_step=getattr(gesture_cfg, "volume_step", 5) if gesture_cfg else 5,
             volume_provider=controller.get_volume if controller is not None else None,
         )
