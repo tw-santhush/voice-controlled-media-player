@@ -482,41 +482,6 @@ def classify_hand(
     return action
 
 
-def draw_volume_bar(frame, percent, show_label: bool = True) -> None:
-    """Draw a horizontal volume bar across the bottom of ``frame``.
-
-    ``percent`` is clamped to 0-100. The bar is a filled rectangle with a
-    percentage label; it is drawn in place on the given frame.
-    """
-    if cv2 is None or frame is None or percent is None:
-        return
-    percent = max(0, min(100, int(round(float(percent)))))
-    h, w = frame.shape[:2]
-    bar_h = 14
-    y = h - bar_h - 8
-    margin = 12
-    x0, x1 = margin, w - margin
-    full = x1 - x0
-    cv2.rectangle(frame, (x0, y), (x1, y + bar_h), (50, 50, 50), -1)
-    fill = int(round(full * percent / 100.0))
-    if fill > 0:
-        color = (0, 200, 90) if percent >= 50 else (0, 130, 220)
-        cv2.rectangle(frame, (x0, y), (x0 + fill, y + bar_h), color, -1)
-    cv2.rectangle(frame, (x0, y), (x1, y + bar_h), (220, 220, 220), 1)
-    if show_label:
-        label = f"Volume: {percent}%"
-        cv2.putText(
-            frame,
-            label,
-            (x0, y - 8),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-
 # BGR colors used by the on-preview gesture feedback overlay.
 _FEEDBACK_GREEN = (60, 200, 60)
 _FEEDBACK_BLUE = (255, 150, 40)
@@ -833,7 +798,6 @@ class GestureController:
         camera_id: int = 0,
         show_preview: bool = False,
         show_feedback: bool = True,
-        show_volume_bar: bool = False,
         debounce_frames: int = 3,
         cooldown_seconds: float = 0.5,
         model_path: str | os.PathLike | None = None,
@@ -854,7 +818,6 @@ class GestureController:
         self.camera_id = camera_id
         self.show_preview = show_preview
         self.show_feedback = bool(show_feedback)
-        self.show_volume_bar = bool(show_volume_bar)
         self.debounce_frames = max(1, debounce_frames)
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self.model_path = model_path
@@ -1038,8 +1001,6 @@ class GestureController:
         if self.show_feedback:
             self._draw_feedback(frame, action)
         if self.show_preview and cv2 is not None:
-            if self.show_volume_bar:
-                draw_volume_bar(frame, self._current_volume())
             cv2.imshow("Gesture Control", frame)
 
     def _current_volume(self) -> int:
@@ -1142,8 +1103,6 @@ class GestureController:
         self._annotate_frame(frame, landmarks, action)
         if self.show_feedback:
             self._draw_feedback(frame, action)
-        if self.show_preview and self.show_volume_bar:
-            draw_volume_bar(frame, self._current_volume())
         return frame
 
     def detect_gesture(self) -> str | None:

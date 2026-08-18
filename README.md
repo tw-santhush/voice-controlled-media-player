@@ -152,7 +152,7 @@ verdicts, the computed thumb camera angle, the swipe velocity components, and th
   **Next Camera** item when running in gesture tray mode. If the requested index (or backend) fails, the app
   automatically falls back to other camera indexes (`0`, then `1`, then `-1`) and to every available video backend
   (DirectShow first on Windows), so a busy or half-initialized webcam is rarely fatal.
-- `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit. An on-screen volume bar is drawn only when `gesture.show_volume_bar` is enabled (default off — most players, VLC included, show their own volume).
+- `--show-preview` opens a preview window showing your hand's landmarks and the detected gesture; press `q` to quit. The volume is shown by the player itself (VLC, MPC-HC), not overlaid on the preview.
 - `--raw-preview` skips gesture detection entirely and just shows the raw webcam feed with diagnostics. Use it first
   when the gesture preview is black or empty: it proves whether the camera itself produces frames. A camera that
   never starts or goes unreadable mid-run is automatically re-opened.
@@ -179,7 +179,6 @@ Gesture tuning lives under the `gesture` section in `config.json`:
     "volume_interval_seconds": 0.5,
     "volume_step": 5,
     "show_feedback": true,
-    "show_volume_bar": false,
     "debug": false,
     "model_path": null
 }
@@ -202,8 +201,6 @@ Gesture tuning lives under the `gesture` section in `config.json`:
 - `show_feedback`: when `--show-preview` is enabled, overlay the detected gesture's name, action and current volume on
   the camera feed (e.g. "Thumbs Up → Volume +5 · Volume: 45%"). Colors indicate the gesture type: green play/pause,
   blue volume, orange swipe, yellow mute, cyan fullscreen (default `true`).
-- `show_volume_bar`: draw a volume progress bar across the bottom of the preview window (default `false`). Off by
-  default because players such as VLC already show their own volume; set it to `true` if you want the on-screen bar back.
 - `debug`: log per-frame finger angles, extended-finger counts and detection reasons to help tune thresholds (default `false`). The same output plus relaxed test thresholds can be enabled per-run with `--gesture-debug`.
 - `model_path`: path to a pre-downloaded `hand_landmarker.task`; `null` auto-downloads and caches it.
 
@@ -341,7 +338,7 @@ To customize:
    | `mpc`              | MPC-HC host, web-interface port, and whether MPC-HC control is enabled   |
    | `voice`            | Listening timeout, phrase time limit (seconds), `energy_threshold`, plus the **noise gate** and **confidence threshold** (see below) |
    | `recognizer`       | Speech engine: `google`, `vosk` (offline), or `auto`, plus the Vosk model path |
-| `gesture`          | Gesture control: `camera_id`, swipe speed/distance/consistency thresholds, pinch and finger-joint thresholds, `show_feedback`, `show_volume_bar`, `debug`, and `model_path` (see Gesture Control) |
+| `gesture`          | Gesture control: `camera_id`, swipe speed/distance/consistency thresholds, pinch and finger-joint thresholds, `show_feedback`, `debug`, and `model_path` (see Gesture Control) |
 | `tray`             | Background mode: `enabled` acts like `--tray` on every run, `auto_start` installs the logon shortcut |
 | `player`           | Default skip seconds and volume step                                     |
    | `push_to_talk`     | Push-to-talk: `enabled` and the `key` to hold                             |
@@ -533,10 +530,10 @@ interface (`command=volume&val=N` for VLC, `volume=N` for MPC-HC).
 
 VLC's HTTP interface uses a **0-200** volume range where `100` is 100%; MPC-HC uses 0-100. The app always works in
 0-100, so for VLC the value is **doubled on the way in** (e.g. "volume 50" sends `val=100`, which VLC reads as 50%,
-not 25%) and **halved when read back** (`get_volume`, and the optional preview volume bar). Relative steps are scaled
+not 25%; 100% sends `val=200`, VLC's maximum) and **halved when read back** (`get_volume`). Relative steps are scaled
 the same way (`volume_up`/`volume_down` read the current percent, apply the step, and go back through `set_volume`, so
-VLC's raw volume moves by twice the app step). MPC-HC needs no conversion. The script's own volume bar overlay is off
-by default — see `gesture.show_volume_bar` — so you can read the figure straight from VLC's own volume slider.
+VLC's raw volume moves by twice the app step). MPC-HC needs no conversion. The preview no longer draws its own volume
+bar — read the figure straight from VLC's own volume slider.
 
 ### Pause and resume listening
 

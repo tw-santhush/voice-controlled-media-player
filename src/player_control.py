@@ -326,7 +326,7 @@ class VLCController(PlayerController):
         """Return the current VLC volume as a 0-100 percent, or None on failure.
 
         VLC reports volume on its own 0-200 scale; this divides it by two so
-        the app (and the preview volume bar) always work in 0-100.
+        the app always works in 0-100.
         """
         self._check_enabled()
         try:
@@ -377,30 +377,62 @@ class VLCController(PlayerController):
             return
         self._report("toggle_mute")
 
+    def _fullscreen_state(self) -> bool | None:
+        """Return the current VLC fullscreen state (True/False), or None if it
+        cannot be read (e.g. VLC is unreachable or not playing)."""
+        try:
+            response = self.session.get(self.base_url, timeout=2)
+            response.raise_for_status()
+            root = ET.fromstring(response.text)
+            value = (root.findtext("fullscreen") or "").strip().lower()
+            return value == "true"
+        except Exception:
+            return None
+
     def toggle_fullscreen(self) -> bool:
         """Toggle VLC fullscreen over HTTP, returning True on success.
 
-        The documented VLC HTTP command is ``command=fullscreen`` (pure toggle;
-        the API cannot set a specific state). If that request fails, an
-        alternate command name (``toggle_fullscreen``) is tried before giving
-        up on HTTP and falling back to the keyboard shortcut. The request URL
-        and response status are logged at debug level so a broken toggle can be
-        diagnosed.
+        The documented VLC HTTP command is ``command=fullscreen`` (pure
+        toggle; the API cannot set a specific state). Some VLC builds use a
+        different command name, so ``toggle_fullscreen`` and
+        ``fullscreen_toggle`` are tried in turn. An HTTP 200 response is not
+        proof the toggle worked — VLC answers the status endpoint for unknown
+        commands too — so after each command the fullscreen state is re-read
+        and only a real change counts as success. If every command fails or is
+        ignored, the keyboard shortcut is used as a fallback. The request URL
+        and response status are logged at debug level so a broken toggle can
+        be diagnosed.
         """
         if not self._check_enabled():
             return False
-        for command in ("fullscreen", "toggle_fullscreen"):
+        before = self._fullscreen_state()
+        for command in ("fullscreen", "toggle_fullscreen", "fullscreen_toggle"):
             try:
                 response = self._http(command)
                 logger.debug(
                     "VLC fullscreen via command=%s: GET %s -> HTTP %s",
                     command, response.url, response.status_code,
                 )
-                self._report("toggle_fullscreen")
-                return True
+                if before is None:
+                    # The status is unreadable, so the command cannot be
+                    # verified; treat a delivered request as success.
+                    self._report("toggle_fullscreen")
+                    return True
+                after = self._fullscreen_state()
+                if after is None:
+                    logger.debug(
+                        "VLC fullscreen: could not re-read state after command=%r; assuming success",
+                        command,
+                    )
+                    self._report("toggle_fullscreen")
+                    return True
+                if after != before:
+                    self._report("toggle_fullscreen")
+                    return True
+                logger.debug("VLC fullscreen: state unchanged after command=%r; trying next", command)
             except requests.RequestException as exc:
                 logger.debug("VLC HTTP fullscreen command=%r failed: %s", command, exc)
-        logger.exception("VLC HTTP fullscreen failed")
+        logger.error("VLC HTTP fullscreen failed or was ignored; using keyboard fallback")
         self._fallback("fullscreen")
         return False
 

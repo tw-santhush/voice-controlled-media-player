@@ -526,6 +526,19 @@ class TestControllers(unittest.TestCase):
             controller.set_volume(500)
         self.assertEqual(mock_get.call_args[1]["params"]["val"], 200)
 
+    def test_vlc_set_volume_100_percent_reaches_full_200_range(self):
+        # The user-visible 100% must map to VLC's max raw value (200), not 78%'s 156.
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.set_volume(100)
+        self.assertEqual(mock_get.call_args[1]["params"]["val"], 200)
+
+    def test_vlc_get_volume_full_200_range_is_100_percent(self):
+        controller = VLCController()
+        with patch.object(controller, "_status", return_value=(200, False)):
+            self.assertEqual(controller.get_volume(), 100)
+
     def test_vlc_get_volume_scales_to_app_percent(self):
         controller = VLCController()
         with patch.object(controller, "_status", return_value=(140, False)):
@@ -634,28 +647,61 @@ class TestControllers(unittest.TestCase):
         mock_response = unittest.mock.MagicMock()
         mock_response.url = "http://localhost:8080/requests/status.xml?command=fullscreen"
         mock_response.status_code = 200
+        state = {"fullscreen": False}
+
+        def flip_state():
+            state["fullscreen"] = not state["fullscreen"]
+            return state["fullscreen"]
+
         with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
-            with self.assertLogs("player_control", level="DEBUG") as cm:
-                self.assertTrue(controller.toggle_fullscreen())
+            with patch.object(controller, "_fullscreen_state", side_effect=flip_state):
+                with self.assertLogs("player_control", level="DEBUG") as cm:
+                    self.assertTrue(controller.toggle_fullscreen())
         self.assertEqual(mock_get.call_args[1]["params"], {"command": "fullscreen"})
+        self.assertEqual(mock_get.call_count, 1)
         text = "\n".join(cm.output)
         self.assertIn("command=fullscreen", text)
         self.assertIn("HTTP 200", text)
 
     def test_vlc_toggle_fullscreen_retries_alternate_command(self):
-        # If command=fullscreen raises, the alternate command name is tried.
+        # If command=fullscreen raises, the alternate command name is tried and
+        # its effect verified before success is reported.
         controller = VLCController()
         mock_response = unittest.mock.MagicMock()
         mock_response.url = "http://localhost:8080/requests/status.xml?command=toggle_fullscreen"
         mock_response.status_code = 200
-        with patch.object(
-            controller.session,
-            "get",
-            side_effect=[requests.ConnectionError("refused"), mock_response],
-        ) as mock_get:
-            self.assertTrue(controller.toggle_fullscreen())
+        states = iter([False, True])  # before, after(toggle_fullscreen)
+        with patch.object(controller.session, "get", side_effect=[requests.ConnectionError("refused"), mock_response]) as mock_get:
+            with patch.object(controller, "_fullscreen_state", side_effect=lambda: next(states)):
+                self.assertTrue(controller.toggle_fullscreen())
         self.assertEqual(mock_get.call_count, 2)
         self.assertEqual(mock_get.call_args_list[1][1]["params"], {"command": "toggle_fullscreen"})
+
+    def test_vlc_toggle_fullscreen_ignores_noop_commands_then_keyboard(self):
+        # command=fullscreen returns 200 but VLC ignores it (state never
+        # changes); every candidate is tried, then the keyboard fallback fires.
+        controller = VLCController()
+        mock_ok = unittest.mock.MagicMock()
+        mock_ok.url = "http://localhost:8080/requests/status.xml?command=fullscreen"
+        mock_ok.status_code = 200
+        with patch.object(controller, "_fullscreen_state", return_value=False):
+            with patch.object(controller.session, "get", return_value=mock_ok) as mock_get:
+                with patch.object(controller, "_fallback") as mock_fallback:
+                    self.assertFalse(controller.toggle_fullscreen())
+        self.assertEqual(mock_get.call_count, 3)
+        commands = [call[1]["params"]["command"] for call in mock_get.call_args_list]
+        self.assertEqual(commands, ["fullscreen", "toggle_fullscreen", "fullscreen_toggle"])
+        mock_fallback.assert_called_once_with("fullscreen")
+
+    def test_vlc_toggle_fullscreen_assumes_success_when_state_unreadable(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        mock_response.url = "http://localhost:8080/requests/status.xml?command=fullscreen"
+        mock_response.status_code = 200
+        with patch.object(controller, "_fullscreen_state", return_value=None):
+            with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+                self.assertTrue(controller.toggle_fullscreen())
+        self.assertEqual(mock_get.call_args[1]["params"], {"command": "fullscreen"})
 
     def test_vlc_toggle_fullscreen_falls_back_to_keyboard_when_all_fail(self):
         controller = VLCController()
@@ -2167,43 +2213,6 @@ class TestGestureFeedback(unittest.TestCase):
             controller = gesture.GestureController(show_feedback=False)
         self.assertFalse(controller.show_feedback)
 
-    def test_volume_bar_disabled_by_default(self):
-        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
-            controller = gesture.GestureController()
-        self.assertFalse(controller.show_volume_bar)
-
-    def test_volume_bar_can_be_enabled(self):
-        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
-            controller = gesture.GestureController(show_volume_bar=True)
-        self.assertTrue(controller.show_volume_bar)
-
-    def _preview_controller(self, show_volume_bar=False):
-        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
-            return gesture.GestureController(
-                show_preview=True,
-                show_feedback=False,
-                show_volume_bar=show_volume_bar,
-            )
-
-    def test_draw_preview_omits_volume_bar_by_default(self):
-        controller = self._preview_controller()
-        frame = MagicMock()
-        frame.shape = (480, 640, 3)
-        cv2 = MagicMock()
-        with patch.object(gesture, "cv2", cv2), patch.object(gesture, "draw_volume_bar") as bar:
-            controller._draw_preview(frame, None, None)
-        bar.assert_not_called()
-        cv2.imshow.assert_called_once()
-
-    def test_draw_preview_shows_volume_bar_when_enabled(self):
-        controller = self._preview_controller(show_volume_bar=True)
-        frame = MagicMock()
-        frame.shape = (480, 640, 3)
-        cv2 = MagicMock()
-        with patch.object(gesture, "cv2", cv2), patch.object(gesture, "draw_volume_bar") as bar:
-            controller._draw_preview(frame, None, None)
-        bar.assert_called_once()
-
     def _feedback_controller(self):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
             return gesture.GestureController()
@@ -2273,9 +2282,6 @@ class TestGestureSetup(unittest.TestCase):
     def test_default_config_has_gesture_feedback_flag(self):
         self.assertIs(config_loader.DEFAULT_CONFIG["gesture"]["show_feedback"], True)
 
-    def test_default_config_volume_bar_off_by_default(self):
-        self.assertIs(config_loader.DEFAULT_CONFIG["gesture"]["show_volume_bar"], False)
-
     def test_default_config_has_tray_section(self):
         self.assertIn("tray", config_loader.DEFAULT_CONFIG)
         self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["enabled"], False)
@@ -2302,7 +2308,6 @@ class TestGestureSetup(unittest.TestCase):
         self.assertIs(cfg.tray.enabled, False)
         self.assertIs(cfg.tray.auto_start, False)
         self.assertIs(cfg.gesture.show_feedback, True)
-        self.assertIs(cfg.gesture.show_volume_bar, False)
 
 
 class _Frame:

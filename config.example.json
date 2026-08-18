@@ -39,7 +39,6 @@
     "volume_interval_seconds": 0.5,
     "volume_step": 5,
     "show_feedback": true,
-    "show_volume_bar": false,
     "model_path": null,
     "debug": false
   },

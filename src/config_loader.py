@@ -54,7 +54,6 @@ DEFAULT_CONFIG = {
         "volume_interval_seconds": 0.5,
         "volume_step": 5,
         "show_feedback": True,
-        "show_volume_bar": False,
         "model_path": None,
         "debug": False,
     },

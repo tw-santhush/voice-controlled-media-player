@@ -1510,9 +1510,6 @@ def main(argv: list[str] | None = None) -> None:
             ),
             gesture_debug=gesture_debug,
             show_feedback=getattr(gesture_cfg, "show_feedback", True) if gesture_cfg else True,
-            show_volume_bar=(
-                getattr(gesture_cfg, "show_volume_bar", False) if gesture_cfg else False
-            ),
             volume_interval_seconds=volume_interval_seconds,
             volume_step=getattr(gesture_cfg, "volume_step", 5) if gesture_cfg else 5,
             volume_provider=controller.get_volume if controller is not None else None,
