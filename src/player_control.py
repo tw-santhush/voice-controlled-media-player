@@ -194,6 +194,13 @@ class VLCController(PlayerController):
         return response
 
     def _status(self):
+        """Fetch VLC status and return ``(volume, muted)`` in raw VLC scale.
+
+        ``volume`` is VLC's own 0-200 HTTP scale (100 == 100%) and is never
+        divided here — callers that work in app-scale 0-100 must apply
+        :func:`_app_volume_from_vlc`. ``muted`` is a boolean parsed from the
+        ``<muted>`` element.
+        """
         response = self.session.get(self.base_url, timeout=2)
         response.raise_for_status()
         root = ET.fromstring(response.text)
@@ -263,10 +270,14 @@ class VLCController(PlayerController):
         if not self._check_enabled():
             return
         try:
-            volume, _ = self._status()
-            # The step is an app-scale percent, so it must be doubled for VLC.
-            new_volume = min(int(volume) + int(step) * 2, VLC_VOLUME_MAX)
-            self._http("volume", {"val": new_volume})
+            current = self.get_volume()
+            if current is None:
+                logger.warning("[vlc] volume_up: could not read current volume")
+                self._fallback("volume_up")
+                return
+            new_percent = min(100, current + int(step))
+            logger.debug("VLC volume_up: %d%% -> %d%% (step %d%%)", current, new_percent, step)
+            self.set_volume(new_percent)
         except requests.RequestException:
             logger.exception("[vlc] HTTP volume up failed")
             self._fallback("volume_up")
@@ -278,9 +289,14 @@ class VLCController(PlayerController):
         if not self._check_enabled():
             return
         try:
-            volume, _ = self._status()
-            new_volume = max(int(volume) - int(step) * 2, 0)
-            self._http("volume", {"val": new_volume})
+            current = self.get_volume()
+            if current is None:
+                logger.warning("[vlc] volume_down: could not read current volume")
+                self._fallback("volume_down")
+                return
+            new_percent = max(0, current - int(step))
+            logger.debug("VLC volume_down: %d%% -> %d%% (step %d%%)", current, new_percent, step)
+            self.set_volume(new_percent)
         except requests.RequestException:
             logger.exception("[vlc] HTTP volume down failed")
             self._fallback("volume_down")
@@ -298,9 +314,11 @@ class VLCController(PlayerController):
         if not self._check_enabled():
             return
         try:
-            self._http("volume", {"val": _vlc_volume_from_app(percent)})
+            raw = _vlc_volume_from_app(percent)
+            logger.debug("Setting VLC volume: %d%% -> raw %d", percent, raw)
+            self._http("volume", {"val": raw})
         except requests.RequestException:
-            logger.exception("[vlc] HTTP set_volume failed")
+            logger.exception("VLC HTTP set_volume failed")
             return
         self._report(f"set_volume ({percent})")
 
@@ -314,9 +332,11 @@ class VLCController(PlayerController):
         try:
             volume, _ = self._status()
         except (requests.RequestException, ValueError, ET.ParseError):
-            logger.debug("[vlc] get_volume failed")
+            logger.debug("VLC get_volume failed")
             return None
-        return _app_volume_from_vlc(volume)
+        scaled = _app_volume_from_vlc(volume)
+        logger.debug("VLC raw volume: %s, scaled: %s", volume, scaled)
+        return scaled
 
     def next(self):
         if not self._check_enabled():
@@ -357,16 +377,32 @@ class VLCController(PlayerController):
             return
         self._report("toggle_mute")
 
-    def toggle_fullscreen(self):
+    def toggle_fullscreen(self) -> bool:
+        """Toggle VLC fullscreen over HTTP, returning True on success.
+
+        The documented VLC HTTP command is ``command=fullscreen`` (pure toggle;
+        the API cannot set a specific state). If that request fails, an
+        alternate command name (``toggle_fullscreen``) is tried before giving
+        up on HTTP and falling back to the keyboard shortcut. The request URL
+        and response status are logged at debug level so a broken toggle can be
+        diagnosed.
+        """
         if not self._check_enabled():
-            return
-        try:
-            self._http("fullscreen")
-        except requests.RequestException:
-            logger.exception("[vlc] HTTP fullscreen failed")
-            self._fallback("fullscreen")
-            return
-        self._report("toggle_fullscreen")
+            return False
+        for command in ("fullscreen", "toggle_fullscreen"):
+            try:
+                response = self._http(command)
+                logger.debug(
+                    "VLC fullscreen via command=%s: GET %s -> HTTP %s",
+                    command, response.url, response.status_code,
+                )
+                self._report("toggle_fullscreen")
+                return True
+            except requests.RequestException as exc:
+                logger.debug("VLC HTTP fullscreen command=%r failed: %s", command, exc)
+        logger.exception("VLC HTTP fullscreen failed")
+        self._fallback("fullscreen")
+        return False
 
 
 class MPCController(PlayerController):

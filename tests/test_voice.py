@@ -557,12 +557,119 @@ class TestControllers(unittest.TestCase):
                 controller.volume_down(step=5)
         self.assertEqual(mock_get.call_args[1]["params"]["val"], 90)
 
+    def test_vlc_volume_up_goes_through_set_volume_in_percent(self):
+        controller = VLCController()
+        with patch.object(controller, "get_volume", return_value=50):
+            with patch.object(controller, "set_volume") as mock_set:
+                controller.volume_up(step=5)
+        mock_set.assert_called_once_with(55)
+
+    def test_vlc_volume_down_goes_through_set_volume_in_percent(self):
+        controller = VLCController()
+        with patch.object(controller, "get_volume", return_value=50):
+            with patch.object(controller, "set_volume") as mock_set:
+                controller.volume_down(step=5)
+        mock_set.assert_called_once_with(45)
+
+    def test_vlc_volume_up_falls_back_when_read_fails(self):
+        controller = VLCController()
+        with patch.object(controller, "get_volume", return_value=None):
+            with patch.object(controller, "_fallback") as mock_fallback:
+                controller.volume_up(step=5)
+        mock_fallback.assert_called_once_with("volume_up")
+
+    def test_vlc_volume_down_falls_back_when_read_fails(self):
+        controller = VLCController()
+        with patch.object(controller, "get_volume", return_value=None):
+            with patch.object(controller, "_fallback") as mock_fallback:
+                controller.volume_down(step=5)
+        mock_fallback.assert_called_once_with("volume_down")
+
     def test_vlc_next_sends_pl_next(self):
         controller = VLCController()
         mock_response = unittest.mock.MagicMock()
         with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
             controller.next()
         self.assertEqual(mock_get.call_args[1]["params"], {"command": "pl_next"})
+
+    def test_vlc_volume_scale_helpers_round_trip(self):
+        from player_control import _app_volume_from_vlc, _vlc_volume_from_app
+
+        self.assertEqual(_app_volume_from_vlc(156), 78)
+        self.assertEqual(_vlc_volume_from_app(78), 156)
+        for percent in range(0, 101, 5):
+            self.assertLessEqual(abs(_app_volume_from_vlc(_vlc_volume_from_app(percent)) - percent), 1)
+
+    def test_vlc_status_returns_raw_volume_unscaled(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        mock_response.text = (
+            "<root><fullscreen>false</fullscreen><volume>156</volume>"
+            "<muted>false</muted><length>0</length></root>"
+        )
+        with patch.object(controller.session, "get", return_value=mock_response):
+            volume, muted = controller._status()
+        self.assertEqual((volume, muted), (156.0, False))
+
+    def test_vlc_get_volume_logs_raw_and_scaled(self):
+        controller = VLCController()
+        with patch.object(controller, "_status", return_value=(156, False)):
+            with self.assertLogs("player_control", level="DEBUG") as cm:
+                self.assertEqual(controller.get_volume(), 78)
+        text = "\n".join(cm.output)
+        self.assertIn("VLC raw volume: 156", text)
+        self.assertIn("scaled: 78", text)
+
+    def test_vlc_set_volume_logs_percent_and_raw(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response):
+            with self.assertLogs("player_control", level="DEBUG") as cm:
+                controller.set_volume(75)
+        text = "\n".join(cm.output)
+        self.assertIn("Setting VLC volume: 75% -> raw 150", text)
+
+    def test_vlc_toggle_fullscreen_sends_fullscreen_command(self):
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        mock_response.url = "http://localhost:8080/requests/status.xml?command=fullscreen"
+        mock_response.status_code = 200
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            with self.assertLogs("player_control", level="DEBUG") as cm:
+                self.assertTrue(controller.toggle_fullscreen())
+        self.assertEqual(mock_get.call_args[1]["params"], {"command": "fullscreen"})
+        text = "\n".join(cm.output)
+        self.assertIn("command=fullscreen", text)
+        self.assertIn("HTTP 200", text)
+
+    def test_vlc_toggle_fullscreen_retries_alternate_command(self):
+        # If command=fullscreen raises, the alternate command name is tried.
+        controller = VLCController()
+        mock_response = unittest.mock.MagicMock()
+        mock_response.url = "http://localhost:8080/requests/status.xml?command=toggle_fullscreen"
+        mock_response.status_code = 200
+        with patch.object(
+            controller.session,
+            "get",
+            side_effect=[requests.ConnectionError("refused"), mock_response],
+        ) as mock_get:
+            self.assertTrue(controller.toggle_fullscreen())
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_get.call_args_list[1][1]["params"], {"command": "toggle_fullscreen"})
+
+    def test_vlc_toggle_fullscreen_falls_back_to_keyboard_when_all_fail(self):
+        controller = VLCController()
+        with patch.object(controller.session, "get", side_effect=requests.ConnectionError("refused")):
+            with patch.object(controller, "_fallback") as mock_fallback:
+                self.assertFalse(controller.toggle_fullscreen())
+        mock_fallback.assert_called_once_with("fullscreen")
+
+    def test_mpc_toggle_fullscreen_sends_wm_830(self):
+        controller = MPCController()
+        mock_response = unittest.mock.MagicMock()
+        with patch.object(controller.session, "get", return_value=mock_response) as mock_get:
+            controller.toggle_fullscreen()
+        self.assertEqual(mock_get.call_args[1]["params"], {"wm_command": 830})
 
 
 class FakeVLC(PlayerController):
@@ -1792,17 +1899,17 @@ class TestGestureRecognition(unittest.TestCase):
             logger.setLevel(previous_level)
         self.assertEqual(captured, [])
 
-    def test_thumb_direction_y_fallback_up_when_axis_ambiguous(self):
+    def test_thumb_direction_vertical_up_when_axis_ambiguous(self):
         # Sideways hand: the hand axis is horizontal and the thumb points
-        # straight up, so the axis dot-product is ~0 (ambiguous). The y-position
-        # fallback must decide "up".
+        # straight up, so the axis dot-product is ~0 (ambiguous). The
+        # camera-vertical angle must decide "up".
         lm = _hand((True, False, False, False, False))
         lm[gesture._PALM] = _Landmark(0.70, 0.85)
         lm[gesture._THUMB_IP] = _Landmark(0.70, 0.80)
         lm[gesture._THUMB_TIP] = _Landmark(0.70, 0.70)
         self.assertEqual(gesture.classify_thumb_direction(lm), "up")
 
-    def test_thumb_direction_y_fallback_down_when_axis_ambiguous(self):
+    def test_thumb_direction_vertical_down_when_axis_ambiguous(self):
         lm = _hand((True, False, False, False, False))
         lm[gesture._PALM] = _Landmark(0.70, 0.85)
         lm[gesture._THUMB_IP] = _Landmark(0.70, 0.80)
@@ -1810,22 +1917,63 @@ class TestGestureRecognition(unittest.TestCase):
         self.assertEqual(gesture.classify_thumb_direction(lm), "down")
 
     def test_thumb_direction_returns_none_when_ambiguous(self):
-        # Thumb barely off horizontal while the hand axis is horizontal too:
-        # the dot-product and the (tiny) y-component are both indeterminate.
+        # Thumb midway between up and down (~49deg above horizontal) while the
+        # hand axis is horizontal too: neither the camera-vertical window nor
+        # the hand-axis fallback recognizes it, so nothing fires.
         lm = _hand((True, False, False, False, False))
         lm[gesture._PALM] = _Landmark(0.70, 0.85)
-        lm[gesture._THUMB_IP] = _Landmark(0.75, 0.80)
-        lm[gesture._THUMB_TIP] = _Landmark(0.75, 0.79)
+        lm[gesture._THUMB_IP] = _Landmark(0.72, 0.80)
+        lm[gesture._THUMB_TIP] = _Landmark(0.79, 0.72)
         self.assertIsNone(gesture.classify_thumb_direction(lm))
 
-    def test_thumb_direction_debug_logs_angle_and_threshold(self):
+    def test_thumb_direction_diagonal_down_within_tolerance_fires(self):
+        # A thumb pointing 70deg from camera vertical (=20deg off straight
+        # down) must still read as "down": the widened window absorbs the
+        # diagonals a real thumb makes instead of requiring near-perfect
+        # vertical pointing.
+        lm = _hand((True, False, False, False, False))
+        lm[gesture._THUMB_IP] = _Landmark(0.70, 0.80)
+        lm[gesture._THUMB_TIP] = _Landmark(0.70 + 0.15 * math.cos(math.radians(70)),
+                                           0.80 + 0.15 * math.sin(math.radians(70)))
+        self.assertEqual(gesture.classify_thumb_direction(lm), "down")
+
+    def test_thumb_direction_debug_logs_camera_angle_and_decision(self):
         lm = _hand((True, False, False, False, False))
         with self.assertLogs("gesture", level="DEBUG") as cm:
             self.assertEqual(gesture.classify_thumb_direction(lm, debug=True), "up")
         text = "\n".join(cm.output)
-        self.assertIn("thumb-vs-axis angle=", text)
-        self.assertIn("up <=", text)
-        self.assertIn("down >=", text)
+        self.assertIn("camera angle=", text)
+        self.assertIn("up -", text)
+        self.assertIn("down +", text)
+
+    def test_thumb_direction_hysteresis_holds_direction_through_flicker(self):
+        now = [100.0]
+        holder = gesture.ThumbDirectionHysteresis(hold_seconds=0.3, now_fn=lambda: now[0])
+        self.assertEqual(holder.feed("down"), "down")
+        # A briefly-ambiguous frame is still reported as "down" for 0.3s.
+        self.assertEqual(holder.feed(None), "down")
+        now[0] += 0.1
+        self.assertEqual(holder.feed(None), "down")
+        # Once the hold expires, the new (empty) verdict passes through.
+        now[0] += 0.4
+        self.assertIsNone(holder.feed(None))
+
+    def test_thumb_direction_hysteresis_yields_to_steady_opposite(self):
+        now = [100.0]
+        holder = gesture.ThumbDirectionHysteresis(hold_seconds=0.3, now_fn=lambda: now[0])
+        holder.feed("up")
+        now[0] += 0.1
+        # A mid-hold flip is kept sticky...
+        self.assertEqual(holder.feed("down"), "up")
+        # ...until the hold window passes, then the new direction takes over.
+        now[0] += 0.4
+        self.assertEqual(holder.feed("down"), "down")
+
+    def test_thumb_direction_hysteresis_reset_clears_hold(self):
+        holder = gesture.ThumbDirectionHysteresis(hold_seconds=0.3)
+        holder.feed("down")
+        holder.reset()
+        self.assertIsNone(holder.feed(None))
 
 
 class TestGestureDebouncer(unittest.TestCase):
@@ -1957,6 +2105,37 @@ class TestGestureSwipe(unittest.TestCase):
         self.assertIn("direction=right", text)
         self.assertIn("consistent=True", text)
 
+    def test_post_swipe_cooldown_blocks_repeat_trigger(self):
+        # After a swipe fires, the tail of the same fast movement is ignored
+        # for 0.3s so one flick cannot fire two commands back-to-back.
+        tracker = gesture.SwipeTracker(
+            window=0.5, velocity_threshold=0.01, min_distance=0.01, consistency_frames=2, cooldown=0.3
+        )
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.7, 0.5), "skip_forward")
+        self.assertIsNone(tracker.feed(100.15, 0.9, 0.5))
+        self.assertIsNone(tracker.feed(100.2, 0.95, 0.5))
+
+    def test_post_swipe_cooldown_allows_later_stroke(self):
+        # Once the hand rests below the velocity threshold and the cooldown
+        # passes, a new deliberate swipe in the same direction fires again.
+        tracker = gesture.SwipeTracker(
+            window=0.5, velocity_threshold=0.5, min_distance=0.01, consistency_frames=2, cooldown=0.3
+        )
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertEqual(tracker.feed(100.1, 0.7, 0.5), "skip_forward")
+        tracker.feed(100.5, 0.72, 0.5)  # resting: clears the stroke
+        tracker.feed(100.6, 0.73, 0.5)  # resting
+        self.assertEqual(tracker.feed(100.7, 0.9, 0.5), "skip_forward")
+
+    def test_small_quick_flick_fires_with_relaxed_defaults(self):
+        # Default thresholds (min_distance 0.08, velocity 0.2) recognize a
+        # short flick that travels only ~0.05 normalized units.
+        tracker = gesture.SwipeTracker()
+        tracker.feed(100.0, 0.5, 0.5)
+        self.assertIsNone(tracker.feed(100.1, 0.52, 0.5))  # fast but short: armed
+        self.assertEqual(tracker.feed(100.2, 0.55, 0.5), "skip_forward")
+
 
 class TestGestureFeedback(unittest.TestCase):
     def test_every_gesture_action_has_feedback(self):
@@ -1987,6 +2166,43 @@ class TestGestureFeedback(unittest.TestCase):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
             controller = gesture.GestureController(show_feedback=False)
         self.assertFalse(controller.show_feedback)
+
+    def test_volume_bar_disabled_by_default(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController()
+        self.assertFalse(controller.show_volume_bar)
+
+    def test_volume_bar_can_be_enabled(self):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            controller = gesture.GestureController(show_volume_bar=True)
+        self.assertTrue(controller.show_volume_bar)
+
+    def _preview_controller(self, show_volume_bar=False):
+        with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
+            return gesture.GestureController(
+                show_preview=True,
+                show_feedback=False,
+                show_volume_bar=show_volume_bar,
+            )
+
+    def test_draw_preview_omits_volume_bar_by_default(self):
+        controller = self._preview_controller()
+        frame = MagicMock()
+        frame.shape = (480, 640, 3)
+        cv2 = MagicMock()
+        with patch.object(gesture, "cv2", cv2), patch.object(gesture, "draw_volume_bar") as bar:
+            controller._draw_preview(frame, None, None)
+        bar.assert_not_called()
+        cv2.imshow.assert_called_once()
+
+    def test_draw_preview_shows_volume_bar_when_enabled(self):
+        controller = self._preview_controller(show_volume_bar=True)
+        frame = MagicMock()
+        frame.shape = (480, 640, 3)
+        cv2 = MagicMock()
+        with patch.object(gesture, "cv2", cv2), patch.object(gesture, "draw_volume_bar") as bar:
+            controller._draw_preview(frame, None, None)
+        bar.assert_called_once()
 
     def _feedback_controller(self):
         with patch.object(gesture, "cv2", None), patch.object(gesture, "HAS_MP", False):
@@ -2057,6 +2273,9 @@ class TestGestureSetup(unittest.TestCase):
     def test_default_config_has_gesture_feedback_flag(self):
         self.assertIs(config_loader.DEFAULT_CONFIG["gesture"]["show_feedback"], True)
 
+    def test_default_config_volume_bar_off_by_default(self):
+        self.assertIs(config_loader.DEFAULT_CONFIG["gesture"]["show_volume_bar"], False)
+
     def test_default_config_has_tray_section(self):
         self.assertIn("tray", config_loader.DEFAULT_CONFIG)
         self.assertIs(config_loader.DEFAULT_CONFIG["tray"]["enabled"], False)
@@ -2066,9 +2285,12 @@ class TestGestureSetup(unittest.TestCase):
         g = config_loader.DEFAULT_CONFIG["gesture"]
         self.assertEqual(g["finger_angle_threshold"], 20)
         self.assertEqual(g["pinch_threshold_ratio"], 0.12)
-        self.assertEqual(g["swipe_min_distance"], 0.15)
-        self.assertEqual(g["swipe_velocity_threshold"], 0.3)
-        self.assertEqual(g["swipe_consistency_frames"], 5)
+        self.assertEqual(g["swipe_min_distance"], 0.08)
+        self.assertEqual(g["swipe_velocity_threshold"], 0.2)
+        self.assertEqual(g["swipe_consistency_frames"], 4)
+        self.assertEqual(g["swipe_cooldown_seconds"], 0.3)
+        self.assertEqual(g["thumb_up_angle_threshold"], 30)
+        self.assertEqual(g["thumb_down_angle_threshold"], 30)
 
     def test_load_config_merges_missing_tray_section(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2080,6 +2302,7 @@ class TestGestureSetup(unittest.TestCase):
         self.assertIs(cfg.tray.enabled, False)
         self.assertIs(cfg.tray.auto_start, False)
         self.assertIs(cfg.gesture.show_feedback, True)
+        self.assertIs(cfg.gesture.show_volume_bar, False)
 
 
 class _Frame:
@@ -2407,6 +2630,15 @@ class TestGestureActions(unittest.TestCase):
         controller = self._controller()
         main.handle_gesture_action("stop", controller, FAKE_LOG, tts_cfg_disabled(), self._state())
         self.assertEqual(controller.calls, ["stop"])
+
+    def test_toggle_fullscreen_action(self):
+        controller = self._controller()
+        with self.assertLogs("test", level="INFO") as cm:
+            main.handle_gesture_action(
+                "toggle_fullscreen", controller, FAKE_LOG, tts_cfg_disabled(), self._state()
+            )
+        self.assertEqual(controller.calls, ["toggle_fullscreen"])
+        self.assertIn("Fullscreen toggled", "\n".join(cm.output))
 
     def test_volume_up_big_steps_ten(self):
         controller = _RecordingController()

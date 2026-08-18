@@ -372,6 +372,7 @@ def handle_gesture_action(action, controller, log: logging.Logger, tts_cfg, stat
             controller.toggle_mute()
         elif action == "toggle_fullscreen":
             controller.toggle_fullscreen()
+            log.info("Fullscreen toggled")
         else:
             log.info("No handler for gesture action: %r", action)
             return
@@ -1484,13 +1485,22 @@ def main(argv: list[str] | None = None) -> None:
             model_path=getattr(gesture_cfg, "model_path", None) if gesture_cfg else None,
             swipe_window=getattr(gesture_cfg, "swipe_window", None) if gesture_cfg else None,
             swipe_velocity_threshold=(
-                getattr(gesture_cfg, "swipe_velocity_threshold", 0.3) if gesture_cfg else 0.3
+                getattr(gesture_cfg, "swipe_velocity_threshold", 0.2) if gesture_cfg else 0.2
             ),
             swipe_min_distance=(
-                getattr(gesture_cfg, "swipe_min_distance", 0.15) if gesture_cfg else 0.15
+                getattr(gesture_cfg, "swipe_min_distance", 0.08) if gesture_cfg else 0.08
             ),
             swipe_consistency_frames=(
-                getattr(gesture_cfg, "swipe_consistency_frames", 5) if gesture_cfg else 5
+                getattr(gesture_cfg, "swipe_consistency_frames", 4) if gesture_cfg else 4
+            ),
+            swipe_cooldown_seconds=(
+                getattr(gesture_cfg, "swipe_cooldown_seconds", 0.3) if gesture_cfg else 0.3
+            ),
+            thumb_up_angle_threshold=(
+                getattr(gesture_cfg, "thumb_up_angle_threshold", 30.0) if gesture_cfg else 30.0
+            ),
+            thumb_down_angle_threshold=(
+                getattr(gesture_cfg, "thumb_down_angle_threshold", 30.0) if gesture_cfg else 30.0
             ),
             pinch_threshold_ratio=(
                 getattr(gesture_cfg, "pinch_threshold_ratio", 0.12) if gesture_cfg else 0.12
@@ -1500,6 +1510,9 @@ def main(argv: list[str] | None = None) -> None:
             ),
             gesture_debug=gesture_debug,
             show_feedback=getattr(gesture_cfg, "show_feedback", True) if gesture_cfg else True,
+            show_volume_bar=(
+                getattr(gesture_cfg, "show_volume_bar", False) if gesture_cfg else False
+            ),
             volume_interval_seconds=volume_interval_seconds,
             volume_step=getattr(gesture_cfg, "volume_step", 5) if gesture_cfg else 5,
             volume_provider=controller.get_volume if controller is not None else None,

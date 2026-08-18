@@ -62,6 +62,11 @@ if mp is not None:
 
 HAS_MP = _TASKS_VISION is not None or _HANDS_SOLUTION is not None
 
+# How long a recognized thumbs-up/down stays "held" so a wobbly thumb angle
+# (which would otherwise flicker frame-to-frame) cannot stutter or flip
+# continuous volume adjustment mid-hold.
+THUMB_HOLD_SECONDS = 0.3
+
 # Map a swipe direction to a player action string.
 SWIPE_ACTIONS = {
     "left": "skip_backward",
@@ -260,65 +265,106 @@ def count_extended_fingers(landmarks, finger_angle_threshold: float = 20.0) -> l
 
 def classify_thumb_direction(
     landmarks,
-    cos_up: float = 0.35,
-    cos_down: float = 0.05,
-    y_threshold: float = 0.10,
+    thumb_up_angle: float = 30.0,
+    thumb_down_angle: float = 30.0,
+    axis_tolerance: float = 45.0,
     debug: bool = False,
 ) -> str | None:
     """Return ``"up"`` or ``"down"`` for an extended thumb, or None.
 
     Two independent cues, either one can trigger:
 
-    1. Orientation-independent angle: how the thumb vector (IP -> tip) lines up
-       with the hand's own axis (wrist -> middle MCP). The angle is computed
-       from the dot product (cosine), so it is scale- and rotation-invariant.
-       Thumbs pointing roughly along the axis → ``"up"``; pointing against it
-       → ``"down"``. ``cos_down`` is deliberately much laxer than ``cos_up`` so
-       a lightly-tilted thumbs-down still triggers.
-    2. Vertical position fallback: the thumb tip's height relative to its IP
-       joint, normalized by the hand span. A tip hanging ``y_threshold`` span
-       units below the IP joint means ``"down"`` (and well above means ``"up"``).
-       This resolves the thumb pointing roughly perpendicular to the hand axis
-       (sideways hand) or a tight fist that makes the axis too short to measure.
+    1. Camera-space angle (widened): the thumb's pointing vector (IP -> tip) is
+       measured against the camera's vertical axis with ``math.atan2``. ``y``
+       grows downward in MediaPipe normalized coordinates, so a thumb pointing
+       straight down is at +90 degrees and straight up at -90 degrees. A thumb
+       is ``"down"`` when its angle stays within ``thumb_down_angle`` degrees of
+       +90 and ``"up"`` when within ``thumb_up_angle`` degrees of -90; the wide
+       windows absorb the diagonals a real thumb naturally makes instead of
+       requiring a near-perfectly vertical pointing direction.
+    2. Orientation-independent fallback: how the thumb vector lines up with the
+       hand's own axis (wrist -> middle MCP), computed from the dot product
+       (cosine), so it is scale- and rotation-invariant. A thumb within
+       ``axis_tolerance`` degrees of the axis counts as ``"up"`` and one within
+       that same tolerance of pointing away from it (>= 180 - tolerance) as
+       ``"down"``. This keeps thumbs recognizable when the whole hand/arm is
+       heavily rotated so the thumb is no longer vertical in the frame.
 
-    With ``debug`` enabled the computed angle (in degrees) and both decision
-    thresholds are logged so they can be tuned per-frame.
+    With ``debug`` enabled the computed camera angle, its up/down windows, the
+    hand-axis angle and the decision are logged so the thresholds can be tuned
+    per-frame.
     """
-    hx = landmarks[_PALM].x - landmarks[_WRIST].x
-    hy = landmarks[_PALM].y - landmarks[_WRIST].y
     tx = landmarks[_THUMB_TIP].x - landmarks[_THUMB_IP].x
     ty = landmarks[_THUMB_TIP].y - landmarks[_THUMB_IP].y
-    hn = math.hypot(hx, hy)
-    tn = math.hypot(tx, ty)
-    if hn < 1e-9 or tn < 1e-9:
+    thumb_norm = math.hypot(tx, ty)
+    if thumb_norm < 1e-9:
         if debug:
-            logger.debug("Thumb direction: hand axis or thumb vector too short to measure")
+            logger.debug("Thumb direction: thumb vector too short to measure")
         return None
-    cos_a = max(-1.0, min(1.0, (hx * tx + hy * ty) / (hn * tn)))
-    degrees = math.degrees(math.acos(cos_a))  # 0=aligned (up), 180=anti-aligned (down)
-    up_deg = math.degrees(math.acos(cos_up))
-    down_deg = 180.0 - math.degrees(math.acos(cos_down))
+
+    # Camera-space angle: +90 = straight down, -90 = straight up (y grows down).
+    angle = math.degrees(math.atan2(ty, tx))
+    up_lo, up_hi = -90.0 - thumb_up_angle, -90.0 + thumb_up_angle
+    down_lo, down_hi = 90.0 - thumb_down_angle, 90.0 + thumb_down_angle
+
+    hx = landmarks[_PALM].x - landmarks[_WRIST].x
+    hy = landmarks[_PALM].y - landmarks[_WRIST].y
+    axis_norm = math.hypot(hx, hy)
+    axis_angle = None
+    if axis_norm >= 1e-9:
+        cos_a = max(-1.0, min(1.0, (hx * tx + hy * ty) / (axis_norm * thumb_norm)))
+        axis_angle = math.degrees(math.acos(cos_a))  # 0=along axis (up), 180=against it (down)
+
     if debug:
         logger.debug(
-            "Thumb direction: thumb-vs-axis angle=%.1fdeg (up <= %.0fdeg, down >= %.0fdeg)",
-            degrees, up_deg, down_deg,
+            "Thumb direction: camera angle=%.1fdeg (up %+.0f..%+.0f, down %+.0f..%+.0f), "
+            "hand axis=%.1fdeg (tolerance +/-%.0f)",
+            angle, up_lo, up_hi, down_lo, down_hi,
+            axis_angle if axis_angle is not None else float("nan"), axis_tolerance,
         )
-    if degrees <= up_deg:
-        return "up"
-    if degrees >= down_deg:
+
+    if down_lo <= angle <= down_hi or (
+        axis_angle is not None and axis_angle >= 180.0 - axis_tolerance
+    ):
         return "down"
-    # Ambiguous by angle: use the thumb's own vertical component.
-    dy = (landmarks[_THUMB_TIP].y - landmarks[_THUMB_IP].y) / hn
-    if debug:
-        logger.debug(
-            "Thumb direction fallback: vertical tip offset=%.2f span units (threshold ±%.2f)",
-            dy, y_threshold,
-        )
-    if dy >= y_threshold:
-        return "down"
-    if dy <= -y_threshold:
+    if up_lo <= angle <= up_hi or (axis_angle is not None and axis_angle <= axis_tolerance):
         return "up"
     return None
+
+
+class ThumbDirectionHysteresis:
+    """Hold the last thumb direction for a moment so wobble doesn't flicker.
+
+    ``classify_thumb_direction`` returns a pure per-frame verdict, which can
+    jitter frame-to-frame at the edge of a threshold. Feeding the verdict
+    through this holder makes it sticky: once a direction is seen it keeps
+    being reported for ``hold_seconds`` even if a frame briefly goes ambiguous
+    (or flips the other way), so a held thumbs-up/down drives continuous
+    volume smoothly instead of stuttering.
+    """
+
+    def __init__(self, hold_seconds: float = THUMB_HOLD_SECONDS, now_fn=time.time):
+        self.hold_seconds = max(0.0, hold_seconds)
+        self._now = now_fn
+        self._held = None
+        self._held_until = 0.0
+
+    def feed(self, direction: str | None) -> str | None:
+        """Return a de-flickered direction, holding the last one for ``hold_seconds``."""
+        now = self._now()
+        if direction == self._held:
+            if direction is not None:
+                self._held_until = now + self.hold_seconds
+            return direction
+        if self._held is not None and now < self._held_until:
+            return self._held
+        self._held = direction
+        self._held_until = now + self.hold_seconds if direction is not None else 0.0
+        return direction
+
+    def reset(self) -> None:
+        self._held = None
+        self._held_until = 0.0
 
 
 def _relative_pinch_distance(landmarks) -> float:
@@ -364,13 +410,17 @@ def classify_hand(
     landmarks,
     pinch_threshold_ratio: float = 0.12,
     finger_angle_threshold: float = 20.0,
+    thumb_up_angle: float = 30.0,
+    thumb_down_angle: float = 30.0,
+    thumb_direction_holder=None,
     debug: bool = False,
 ) -> str | None:
     """Classify a hand shape into an action string, or None if unrecognized.
 
     Gesture mapping:
     - index finger only -> ``play_pause`` (toggle)
-    - thumb only (pointing along/against the hand axis) -> ``volume_up`` /
+    - thumb only (within a wide angle of straight up/down in the frame, or
+      along/against the hand axis when rotated) -> ``volume_up`` /
       ``volume_down`` (continuous)
     - index + thumb pinched together (only those two extended) ->
       ``toggle_fullscreen``; the tip gap is compared against ``pinch_threshold_ratio``
@@ -379,8 +429,12 @@ def classify_hand(
     - closed fist -> None (deliberately no action)
 
     Finger extension uses the PIP-joint angle (see :func:`count_extended_fingers`)
-    with ``finger_angle_threshold`` degrees of allowed curvature. With ``debug``
-    enabled the joint angles and verdicts are logged so thresholds can be tuned.
+    with ``finger_angle_threshold`` degrees of allowed curvature. ``thumb_up_angle``
+    and ``thumb_down_angle`` widen the thumbs-up/down acceptance in degrees around
+    the camera's vertical axis (see :func:`classify_thumb_direction`). A
+    ``thumb_direction_holder`` (a :class:`ThumbDirectionHysteresis`) can be supplied
+    to de-flicker the per-frame direction verdict. With ``debug`` enabled the joint
+    angles and verdicts are logged so thresholds can be tuned.
     A fully-open hand returns None: the open-hand swipes are handled by
     ``SwipeTracker`` so a stationary open palm deliberately fires nothing.
     """
@@ -403,7 +457,14 @@ def classify_hand(
     elif ext[1] and not ext[0] and not ext[2] and not ext[3] and not ext[4]:
         action, reason = "play_pause", "index finger only"     # Index only -> play/pause
     elif ext[0] and not any(ext[1:]):
-        direction = classify_thumb_direction(landmarks, debug=debug)
+        direction = classify_thumb_direction(
+            landmarks,
+            thumb_up_angle=thumb_up_angle,
+            thumb_down_angle=thumb_down_angle,
+            debug=debug,
+        )
+        if thumb_direction_holder is not None:
+            direction = thumb_direction_holder.feed(direction)
         if debug:
             logger.debug("Thumb-only: relative direction=%s", direction)
         if direction == "up":
@@ -614,8 +675,16 @@ class SwipeTracker:
     - the most recent ``consistency_frames`` samples all moved toward the latest
       position in the same dominant direction.
 
+    The defaults are deliberately easy to reach: a short, fast flick that only
+    travels a little and then stops is the target motion, so ``min_distance``
+    and ``velocity_threshold`` are low. A quick flick that has not travelled
+    ``min_distance`` yet is kept "armed" for a short ``hold`` window so it still
+    fires.
+
     A swipe fires once per stroke: after firing, the same direction is not
-    reported again until the hand slows back down below the thresholds.
+    reported again until the hand slows back down below the thresholds, and all
+    swipes are ignored for ``cooldown`` seconds so the tail of one flick (or a
+    continuing fast motion) cannot trigger a second command.
     """
 
     _TOLERANCE = 0.005  # allowed landmark wobble against the dominant axis
@@ -623,10 +692,11 @@ class SwipeTracker:
     def __init__(
         self,
         window: float = 0.4,
-        velocity_threshold: float = 0.3,
-        min_distance: float = 0.15,
-        consistency_frames: int = 5,
+        velocity_threshold: float = 0.2,
+        min_distance: float = 0.08,
+        consistency_frames: int = 4,
         hold: float = 0.15,
+        cooldown: float = 0.3,
         threshold: float | None = None,
         debug: bool = False,
     ):
@@ -635,15 +705,18 @@ class SwipeTracker:
         self.min_distance = max(0.005, min_distance)
         self.consistency_frames = max(2, int(consistency_frames))
         self.hold = max(0.0, hold)
+        self.cooldown = max(0.0, cooldown)
         self.debug = bool(debug)
         self._history = deque(maxlen=64)
         self._stroke = None
         self._pending = None
         self._ignore_static_until = 0.0
+        self._cooldown_until = 0.0
 
     def reset(self) -> None:
         self._history.clear()
         self._stroke = None
+        self._cooldown_until = 0.0
 
     def ignore_static(self, now: float) -> bool:
         """True shortly after a swipe, so the held hand pose isn't also fired."""
@@ -675,6 +748,13 @@ class SwipeTracker:
         if len(self._history) < 2:
             return None
 
+        # Post-swipe cooldown: the tail of a flick (or a continuing fast motion
+        # from the same stroke) must not fire another command right after one
+        # already went out. History keeps updating so a fresh stroke after the
+        # cooldown is measured against current samples.
+        if now < self._cooldown_until:
+            return None
+
         first_t, first_x, first_y = self._history[0]
         elapsed = now - first_t
         dx = cx - first_x
@@ -688,15 +768,18 @@ class SwipeTracker:
         else:
             direction = "up" if dy < 0 else "down"
         consistent = self._consistent(direction, cx, cy)
+        velocity_ok = velocity >= self.velocity_threshold
+        distance_ok = distance >= self.min_distance
         if self.debug:
             logger.debug(
-                "Swipe: dx=%.3f dy=%.3f travel=%.3f (min %.3f), velocity=%.2f (min %.2f), "
+                "Swipe: dx=%.3f dy=%.3f travel=%.3f/%s (min %.3f), velocity=%.2f/%s (min %.2f), "
                 "direction=%s, consistent=%s",
-                dx, dy, distance, self.min_distance, velocity, self.velocity_threshold,
-                direction, consistent,
+                dx, dy, distance, "OK" if distance_ok else "short",
+                self.min_distance, velocity, "OK" if velocity_ok else "slow",
+                self.velocity_threshold, direction, consistent,
             )
 
-        if velocity < self.velocity_threshold:
+        if not velocity_ok:
             # The hand is (mostly) at rest: allow the next stroke in the same
             # direction to fire again, and drop any armed quick-flick stroke.
             self._stroke = None
@@ -707,13 +790,14 @@ class SwipeTracker:
             self._pending = None
             return None
 
-        if distance >= self.min_distance:
+        if distance_ok:
             # Full stroke: fire once per direction until the hand rests.
             if direction == self._stroke:
                 return None
             self._pending = None
             self._stroke = direction
             self._ignore_static_until = now + 0.6
+            self._cooldown_until = now + self.cooldown
             return SWIPE_ACTIONS[direction]
 
         # Fast flick that has not travelled far enough yet: keep it armed for a
@@ -728,6 +812,7 @@ class SwipeTracker:
             self._pending = None
             self._stroke = direction
             self._ignore_static_until = now + 0.6
+            self._cooldown_until = now + self.cooldown
             return SWIPE_ACTIONS[direction]
 
         self._pending = (direction, now)
@@ -748,13 +833,17 @@ class GestureController:
         camera_id: int = 0,
         show_preview: bool = False,
         show_feedback: bool = True,
+        show_volume_bar: bool = False,
         debounce_frames: int = 3,
         cooldown_seconds: float = 0.5,
         model_path: str | os.PathLike | None = None,
         swipe_window: float | None = None,
-        swipe_velocity_threshold: float = 0.3,
-        swipe_min_distance: float = 0.15,
-        swipe_consistency_frames: int = 5,
+        swipe_velocity_threshold: float = 0.2,
+        swipe_min_distance: float = 0.08,
+        swipe_consistency_frames: int = 4,
+        swipe_cooldown_seconds: float = 0.3,
+        thumb_up_angle_threshold: float = 30.0,
+        thumb_down_angle_threshold: float = 30.0,
         pinch_threshold_ratio: float = 0.12,
         finger_angle_threshold: float = 20.0,
         gesture_debug: bool = False,
@@ -765,11 +854,15 @@ class GestureController:
         self.camera_id = camera_id
         self.show_preview = show_preview
         self.show_feedback = bool(show_feedback)
+        self.show_volume_bar = bool(show_volume_bar)
         self.debounce_frames = max(1, debounce_frames)
         self.cooldown_seconds = max(0.0, cooldown_seconds)
         self.model_path = model_path
         self.pinch_threshold_ratio = max(0.01, pinch_threshold_ratio)
         self.finger_angle_threshold = max(0.0, min(180.0, finger_angle_threshold))
+        self.swipe_cooldown_seconds = max(0.0, swipe_cooldown_seconds)
+        self.thumb_up_angle_threshold = max(1.0, thumb_up_angle_threshold)
+        self.thumb_down_angle_threshold = max(1.0, thumb_down_angle_threshold)
         self.gesture_debug = bool(gesture_debug)
         self.volume_interval_seconds = max(0.1, volume_interval_seconds)
         self.volume_step = max(1, int(volume_step))
@@ -786,11 +879,13 @@ class GestureController:
         self._thread = None
         self._paused = False
         self._debouncer = Debouncer(self.debounce_frames, self.cooldown_seconds)
+        self._thumb_direction = ThumbDirectionHysteresis(THUMB_HOLD_SECONDS)
         self._swipes = SwipeTracker(
             window=swipe_window if swipe_window is not None else 0.4,
             velocity_threshold=swipe_velocity_threshold,
             min_distance=swipe_min_distance,
             consistency_frames=swipe_consistency_frames,
+            cooldown=swipe_cooldown_seconds,
             debug=self.gesture_debug,
         )
         self._cap = None
@@ -943,7 +1038,8 @@ class GestureController:
         if self.show_feedback:
             self._draw_feedback(frame, action)
         if self.show_preview and cv2 is not None:
-            draw_volume_bar(frame, self._current_volume())
+            if self.show_volume_bar:
+                draw_volume_bar(frame, self._current_volume())
             cv2.imshow("Gesture Control", frame)
 
     def _current_volume(self) -> int:
@@ -1038,12 +1134,15 @@ class GestureController:
                     landmarks,
                     pinch_threshold_ratio=self.pinch_threshold_ratio,
                     finger_angle_threshold=self.finger_angle_threshold,
+                    thumb_up_angle=self.thumb_up_angle_threshold,
+                    thumb_down_angle=self.thumb_down_angle_threshold,
+                    thumb_direction_holder=self._thumb_direction,
                     debug=self.gesture_debug,
                 )
         self._annotate_frame(frame, landmarks, action)
         if self.show_feedback:
             self._draw_feedback(frame, action)
-        if self.show_preview:
+        if self.show_preview and self.show_volume_bar:
             draw_volume_bar(frame, self._current_volume())
         return frame
 
@@ -1096,6 +1195,7 @@ class GestureController:
         if landmarks is None:
             self._swipes.reset()
             self._debouncer.reset()
+            self._thumb_direction.reset()
             self._volume_hold_action = None
             self._volume_next_at = 0.0
             self._draw_preview(frame, None, None)
@@ -1120,6 +1220,9 @@ class GestureController:
                 landmarks,
                 pinch_threshold_ratio=self.pinch_threshold_ratio,
                 finger_angle_threshold=self.finger_angle_threshold,
+                thumb_up_angle=self.thumb_up_angle_threshold,
+                thumb_down_angle=self.thumb_down_angle_threshold,
+                thumb_direction_holder=self._thumb_direction,
                 debug=self.gesture_debug,
             )
         if self.gesture_debug:
