@@ -535,6 +535,14 @@ the same way (`volume_up`/`volume_down` read the current percent, apply the step
 VLC's raw volume moves by twice the app step). MPC-HC needs no conversion. The preview no longer draws its own volume
 bar — read the figure straight from VLC's own volume slider.
 
+> **If VLC's slider still tops out below 100%** (a common report is it stops around 78%): this is VLC's
+> **Maximum volume** setting, not the script. VLC's default max is 125%, and it clamps any requested volume above
+> that. Raise it via *Tools → Preferences → All → Audio → Maximum volume* (set to **200%** so 100% maps to the
+> full 0-200 range). If you want VLC to flash an on-screen volume indicator when the volume changes, enable
+> *Tools → Preferences → All → Interface → OSD → Show OSD messages* — both are VLC-side settings the HTTP interface
+> cannot change. Run with `--debug` and look for the `VLC raw volume: ... scaled: ...` lines to confirm what the
+> script is actually sending and reading.
+
 ### Pause and resume listening
 
 The `listen_on`/`listen_off` commands and the tray menu toggle the same "listening" flag. When paused, every
