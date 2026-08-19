@@ -1,8 +1,8 @@
 """System tray icon for gesture (webcam) mode.
 
-Small, gesture-specific wrapper around the shared tray helpers. Provides the
-same start/stop toggle as the voice tray, plus a webcam-preview toggle and a
-camera switcher. Everything degrades gracefully when pystray is missing.
+Small, gesture-specific wrapper around the shared tray helpers. Provides a
+start/stop detection toggle, a webcam-preview toggle and a camera switcher.
+Everything degrades gracefully when pystray is missing.
 """
 
 import logging
@@ -51,7 +51,6 @@ def create_gesture_tray_icon(gesture, controller, state=None, verbose: bool = Fa
         controller,
         state=state,
         verbose=verbose,
-        mode="gesture",
     )
     if icon is None:
         return None

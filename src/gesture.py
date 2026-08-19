@@ -510,7 +510,7 @@ def _download_hand_model(path: Path) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Downloading MediaPipe hand-landmarker model (%s)...", HAND_MODEL_URL)
-    request = urllib.request.Request(HAND_MODEL_URL, headers={"User-Agent": "voice-controlled-media-player/1.0"})
+    request = urllib.request.Request(HAND_MODEL_URL, headers={"User-Agent": "gesture-controlled-media-player/1.0"})
     with urllib.request.urlopen(request, timeout=60) as response, open(path, "wb") as out:
         shutil.copyfileobj(response, out)
     logger.info("Hand-landmarker model saved to %s", path)
@@ -790,7 +790,7 @@ class GestureController:
     Attributes:
         available: True when OpenCV/MediaPipe loaded and the camera opened.
         error: description of why detection is unavailable (else None).
-        running: True while the loop is alive (mirrors VoiceListener).
+        running: True while the loop is alive.
     """
 
     def __init__(

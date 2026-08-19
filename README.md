@@ -4,8 +4,6 @@ Control the VLC media player using **hand gestures** through your webcam. No voi
 
 The app reads your webcam feed with OpenCV + MediaPipe, classifies the gesture, and drives VLC over its HTTP web interface. Fingers do the talking; the audio stays yours.
 
-> Voice control was removed from this project. If you have an older checkout, ignore the old `--mode voice` flags — they are legacy and no longer supported.
-
 ## Features
 
 | Gesture                          | Action              | Behavior                          |
@@ -82,7 +80,7 @@ Key gesture settings:
 ### Preview mode (test the gestures first)
 
 ```bash
-python src/main.py --mode gesture --show-preview
+python src/main.py --show-preview
 ```
 
 Opens a live preview window with your hand landmarks and the detected gesture (press `q` to exit). If the feed is black, run with `--raw-preview` to check the camera alone.
@@ -93,7 +91,7 @@ Opens a live preview window with your hand landmarks and the detected gesture (p
 python src/main.py --tray
 ```
 
-Runs in the background with a tray icon (install `pystray` + `pillow` first: `pip install pystray pillow`). The tray menu can start/stop listening, switch the webcam, and toggle the preview. Keep `--mode gesture` when you want gesture control explicitly.
+Runs in the background with a tray icon (install `pystray` + `pillow` first: `pip install pystray pillow`). The tray menu can start/stop listening, switch the webcam, and toggle the preview.
 
 ### Auto-start on Windows
 

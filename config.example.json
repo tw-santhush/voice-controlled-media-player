@@ -10,19 +10,6 @@
     "port": 13579,
     "enabled": true
   },
-  "voice": {
-    "timeout_seconds": 5,
-    "phrase_time_limit": 3,
-    "energy_threshold": 20,
-    "dynamic_energy_threshold": false,
-    "noise_gate_enabled": true,
-    "noise_gate_threshold": 10.0,
-    "confidence_threshold": 0.5
-  },
-  "recognizer": {
-    "engine": "auto",
-    "vosk_model_path": null
-  },
   "gesture": {
     "camera_id": 0,
     "debounce_frames": 3,
@@ -50,10 +37,6 @@
     "default_skip_seconds": 10,
     "volume_step": 5
   },
-  "push_to_talk": {
-    "enabled": false,
-    "key": "ctrl"
-  },
   "keyboard_fallback": {
     "enabled": true,
     "shortcuts": {
@@ -66,38 +49,5 @@
       "mute": "m",
       "fullscreen": "f"
     }
-  },
-  "tts": {
-    "enabled": true,
-    "voice_id": null,
-    "engine": "auto",
-    "fallback_enabled": true,
-    "cooldown_seconds": 1.5
-  },
-  "wake": {
-    "enabled": true,
-    "engine": "porcupine",
-    "phrases": ["hey player", "hello player", "player", "hey"],
-    "porcupine_keywords": ["porcupine", "hey google"],
-    "porcupine_keyword_paths": [],
-    "porcupine_access_key": null,
-    "timeout_seconds": 5
-  },
-  "commands": {
-    "play": ["play", "continue", "start", "play movie", "play video"],
-    "pause": ["pause", "hold", "stop playing", "freeze", "pause movie", "pause video"],
-    "stop": ["stop", "quit", "end", "stop movie", "exit playback", "stop video"],
-    "skip_forward": ["skip forward", "forward 10 seconds", "jump forward", "next 10 seconds", "advance", "go forward", "skip ahead", "fast forward"],
-    "skip_backward": ["skip backward", "backward 10 seconds", "go back", "rewind 10 seconds", "go backward", "skip behind", "rewind"],
-    "volume_up": ["volume up", "louder", "increase volume", "turn up", "raise volume", "more volume"],
-    "volume_down": ["volume down", "softer", "decrease volume", "turn down", "lower volume", "less volume"],
-    "mute": ["mute", "silence", "no sound", "turn off sound", "mute audio"],
-    "fullscreen": ["fullscreen", "full screen", "maximize", "go fullscreen", "enter fullscreen", "expand"],
-    "exit": ["exit", "quit app", "close", "shutdown", "terminate", "exit application"],
-    "next": ["next", "next chapter", "next track", "skip to next", "next video", "next episode", "forward chapter"],
-    "previous": ["previous", "previous chapter", "previous track", "go back a chapter", "previous video", "back chapter", "go to previous"],
-    "listen_on": ["listen", "start listening", "resume", "turn on", "enable"],
-    "listen_off": ["stop listening", "pause listening", "turn off", "disable", "go silent"],
-    "volume_set": []
   }
 }
